@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  kite-trading:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kite-trading
+    ports:
+      - "8080:8080"
+    environment:
+      - KITE_API_KEY=${KITE_API_KEY}
+      - KITE_API_SECRET=${KITE_API_SECRET}
+      - KITE_BASE_URL=${KITE_BASE_URL:-https://api.kite.trade}
+      - KITE_LOGIN_URL=${KITE_LOGIN_URL:-https://kite.zerodha.com/connect/login}
+      - KITE_REDIRECT_URL=${KITE_REDIRECT_URL:-http://localhost:8080/api/v1/auth/callback}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
