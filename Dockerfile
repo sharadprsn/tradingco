@@ -27,11 +27,12 @@ WORKDIR /app
 # Create non-root user for security
 RUN addgroup -S spring && adduser -S spring -G spring
 
-# Copy the built JAR from build stage
+# Copy the built JAR and keystore from build stage
 COPY --from=build /app/build/libs/kite-trading-1.0.0.jar app.jar
+COPY keystore.p12 keystore.p12
 
 # Change ownership to non-root user
-RUN chown spring:spring app.jar
+RUN chown spring:spring app.jar keystore.p12
 
 # Switch to non-root user
 USER spring

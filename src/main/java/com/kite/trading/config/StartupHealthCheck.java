@@ -1,7 +1,7 @@
 package com.kite.trading.config;
 
 import com.kite.trading.dto.OptionChainData;
-import com.kite.trading.service.NseOptionChainClient;
+import com.kite.trading.service.OptionChainClient;
 import com.kite.trading.service.TelegramService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -20,12 +20,12 @@ public class StartupHealthCheck {
     private static final Logger logger = LoggerFactory.getLogger(StartupHealthCheck.class);
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
 
-    private final NseOptionChainClient nseClient;
+    private final OptionChainClient optionChainClient;
     private final TelegramService telegramService;
 
-    public StartupHealthCheck(final NseOptionChainClient nseClient,
+    public StartupHealthCheck(final OptionChainClient optionChainClient,
                               final TelegramService telegramService) {
-        this.nseClient = nseClient;
+        this.optionChainClient = optionChainClient;
         this.telegramService = telegramService;
     }
 
@@ -47,7 +47,7 @@ public class StartupHealthCheck {
     private void checkNseConnectivity() {
         logger.info("[NSE] Checking connectivity to NSE website...");
         try {
-            final OptionChainData data = nseClient.fetchOptionChain();
+            final OptionChainData data = optionChainClient.fetchOptionChain();
             if (data != null && data.records() != null) {
                 final var records = data.records();
                 final boolean hasData = records.data() != null && !records.data().isEmpty();

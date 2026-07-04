@@ -43,7 +43,7 @@ public class OiAnalysisService {
     private static final BigDecimal MIN_PCR_CHANGE_FOR_NOTIFICATION = BigDecimal.valueOf(0.05);
     private static final BigDecimal MIN_OI_CHANGE_FRACTION = BigDecimal.valueOf(0.05);
 
-    private final NseOptionChainClient nseClient;
+    private final OptionChainClient optionChainClient;
     private final TelegramService telegramService;
 
     private final List<OiDataSnapshot> snapshots = new CopyOnWriteArrayList<>();
@@ -54,14 +54,14 @@ public class OiAnalysisService {
     private volatile boolean positionEntered;
     private volatile boolean predictionSentToday;
 
-    public OiAnalysisService(final NseOptionChainClient nseClient,
+    public OiAnalysisService(final OptionChainClient optionChainClient,
                              final TelegramService telegramService) {
-        this.nseClient = nseClient;
+        this.optionChainClient = optionChainClient;
         this.telegramService = telegramService;
     }
 
     public OiDataSnapshot fetchAndRecordOi() {
-        final OptionChainData data = nseClient.fetchOptionChain();
+        final OptionChainData data = optionChainClient.fetchOptionChain();
         if (data == null || data.records() == null || data.records().data() == null) {
             logger.warn("No option chain data available");
             return null;

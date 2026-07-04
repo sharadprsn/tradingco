@@ -169,11 +169,11 @@ docker tag kite-trading:latest sharadprsn/kite-trading:latest
 docker tag kite-trading:latest sharadprsn/kite-trading:1.0.0
 
 # Push to registry
-docker push your-registry/kite-trading:latest
-docker push your-registry/kite-trading:1.0.0
+docker push sharadprsn/kite-trading:latest
+docker push sharadprsn/kite-trading:1.0.0
 
 # Run from registry (after push)
-docker run -d --name kite-trading -p 8080:8080 --env-file .env your-registry/kite-trading:latest
+docker run -d --name kite-trading -p 8080:8080 --env-file .env sharadprsn/kite-trading:latest
 ```
 
 > **Note**: Replace `your-registry` with your actual Docker registry (e.g., `docker.io/username`, `ghcr.io/username`, or a private registry). Login first with `docker login` if required.

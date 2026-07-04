@@ -71,6 +71,19 @@ public class IntradayOiScheduler {
         telegramService.sendMessage("OI Scheduler initialized for today's session.");
     }
 
+    @Scheduled(cron = "0 5 9 * * MON-FRI", zone = "Asia/Kolkata")
+    public void sendLoginUrl() {
+        try {
+            final String baseUrl = System.getenv().getOrDefault("APP_BASE_URL", "https://localhost:443");
+            final String loginEndpoint = baseUrl.replaceAll("/+$", "") + "/api/v1/auth/login-url";
+            final String message = "\uD83D\uDD11 Visit the link below to authenticate with Kite:\n" + loginEndpoint;
+            telegramService.sendMessage(message);
+            logger.info("Kite login URL endpoint sent via Telegram: {}", loginEndpoint);
+        } catch (final Exception e) {
+            logger.error("Failed to send login URL", e);
+        }
+    }
+
     @Scheduled(cron = "0 0 16 * * MON-FRI", zone = "Asia/Kolkata")
     public void marketCloseSummary() {
         if (!oiAnalysisService.getSnapshots().isEmpty()) {

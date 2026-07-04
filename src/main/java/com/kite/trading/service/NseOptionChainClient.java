@@ -13,7 +13,7 @@ import reactor.core.publisher.Mono;
 import java.util.List;
 
 @Component
-public class NseOptionChainClient {
+public class NseOptionChainClient implements OptionChainClient {
 
     private static final Logger logger = LoggerFactory.getLogger(NseOptionChainClient.class);
 

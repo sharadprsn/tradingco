@@ -23,10 +23,16 @@ public class TelegramServiceImpl implements TelegramService {
 
     @Override
     public void sendMessage(final String chatId, final String text) {
+        final String botToken = telegramConfig.getBotToken();
+        if (botToken == null || botToken.isBlank()) {
+            logger.error("TELEGRAM_BOT_TOKEN is empty — set it in .env or environment variables");
+            return;
+        }
+
         logger.info("Sending Telegram message to chat: {}", chatId);
 
         try {
-            final String url = telegramConfig.getBaseUrl() + "/bot" + telegramConfig.getBotToken() + "/sendMessage";
+            final String url = telegramConfig.getBaseUrl() + "/bot" + botToken + "/sendMessage";
 
             webClient.post()
                     .uri(url)
