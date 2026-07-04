@@ -1,257 +1,132 @@
-# Kite Trading API
+# Kite Trading — OI-Based Nifty Intraday Monitor
 
-A Spring Boot application for interacting with Zerodha's Kite API to manage trading positions, including NIFTY intraday positions.
+A Spring Boot application that monitors NSE Nifty option chain data in real time, computes Put-Call Ratio (PCR) and Open Interest (OI) buildup, predicts intraday direction at 10 AM, and sends trade recommendations via Telegram.
 
 ## Features
 
-- **Authentication**: OAuth-based login via Kite Connect URL
-- **Position Management**: Fetch all active trading positions
-- **NIFTY Intraday**: Filter and retrieve NIFTY intraday positions specifically
-- **RESTful API**: Well-structured REST endpoints following best practices
-- **Docker Support**: Containerized deployment ready
+- **OI Analysis** — Fetches NSE option chain every 6 minutes, filters ATM ± 5 strikes
+- **Direction Prediction** — Bullish/Bearish/Neutral based on PE vs CE OI change dominance (60% threshold)
+- **Trade Recommendations** — Suggests sell strike, expiry, and hedge leg (calendar/diagonal spread)
+- **Exit Signals** — Monitors PCR shift (> 0.3) and direction reversal since entry
+- **Telegram Notifications** — 10 AM prediction, periodic OI updates (threshold-gated), exit alerts
+- **Startup Health Check** — Verifies NSE connectivity and Telegram bot on startup
+- **Scheduler** — Weekday only (9:30 AM–3:30 PM), 6-minute interval, auto-reset daily
+- **Docker** — Multi-stage build, JRE Alpine, non-root user, health check
 
 ## Prerequisites
 
-- Java 21 or higher
-- Gradle 8.x
-- Docker (for containerized deployment)
-- Zerodha Kite API credentials (API Key only)
+- Java 21
+- Gradle 9.x (bundled wrapper)
+- Docker (optional, for containerised deployment)
+- Telegram bot token (from [@BotFather](https://t.me/BotFather))
+- Zerodha Kite API credentials (optional — for order placement endpoints)
 
-## Project Structure
+## Quick Start
 
-```
-kite-java/
-├── src/
-│   ├── main/
-│   │   ├── java/com/kite/trading/
-│   │   │   ├── KiteTradingApplication.java
-│   │   │   ├── config/
-│   │   │   │   ├── KiteConfig.java
-│   │   │   │   └── WebClientConfig.java
-│   │   │   ├── controller/
-│   │   │   │   ├── AuthController.java
-│   │   │   │   └── PositionController.java
-│   │   │   ├── dto/
-│   │   │   │   ├── ErrorResponse.java
-│   │   │   │   ├── KiteSession.java
-│   │   │   │   ├── LoginUrlResponse.java
-│   │   │   │   ├── Position.java
-│   │   │   │   ├── PositionsResponse.java
-│   │   │   │   └── SessionRequest.java
-│   │   │   ├── exception/
-│   │   │   │   ├── GlobalExceptionHandler.java
-│   │   │   │   ├── KiteApiException.java
-│   │   │   │   └── KiteAuthenticationException.java
-│   │   │   └── service/
-│   │   │       ├── KiteAuthService.java
-│   │   │       ├── PositionService.java
-│   │   │       ├── ZerodhaApiClient.java
-│   │   │       ├── ZerodhaApiClientImpl.java
-│   │   │       ├── ZerodhaAuthService.java
-│   │   │       └── ZerodhaPositionService.java
-│   │   └── resources/
-│   │       └── application.properties
-│   └── test/
-│       └── java/com/kite/trading/
-├── build.gradle
-├── settings.gradle
-├── Dockerfile
-├── docker-compose.yml
-├── .env.example
-├── .gitignore
-└── README.md
-```
-
-## Architecture
-
-This application follows SOLID principles:
-
-- **Single Responsibility Principle**: Each class has a single responsibility
-- **Open/Closed Principle**: Code is open for extension but closed for modification
-- **Liskov Substitution Principle**: Interfaces are used to define contracts
-- **Interface Segregation Principle**: Multiple specific interfaces instead of one general-purpose interface
-- **Dependency Inversion Principle**: High-level modules don't depend on low-level modules; both depend on abstractions
-
-### Design Patterns
-
-- **Repository Pattern**: API clients abstract the data access layer
-- **Strategy Pattern**: Different position filtering strategies
-- **DTO Pattern**: Data transfer objects for API communication
-- **Service Layer Pattern**: Business logic encapsulated in services
-
-## Getting Started
-
-### 1. Clone the Repository
-
-```bash
-git clone https://github.com/yourusername/kite-java.git
-cd kite-java
-```
-
-### 2. Set Up Environment Variables
-
-Copy the `.env.example` file to `.env` and fill in your credentials:
+### 1. Clone & Configure
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` with your Zerodha Kite credentials:
+Edit `.env` with your credentials:
+
 ```env
-KITE_API_KEY=your-actual-api-key
-KITE_API_SECRET=your-actual-api-secret
+KITE_API_KEY=your-api-key
+KITE_API_SECRET=your-api-secret
+
+TELEGRAM_BOT_TOKEN=your-bot-token
+TELEGRAM_CHAT_ID=your-chat-id
 ```
 
-The `.env` file is automatically loaded at startup by the `spring-dotenv` library.
-You can also set the same values as OS environment variables — Spring Boot will
-pick those up natively.
-
-### 3. Build the Application
-
-```bash
-./gradlew build
-```
-
-### 4. Run the Application
+### 2. Run
 
 ```bash
 ./gradlew bootRun
 ```
 
-Or run the JAR directly:
+The app starts on port 8080. Check the logs — you should see a Telegram startup message.
+
+### 3. Docker
 
 ```bash
-java -jar build/libs/kite-trading-1.0.0.jar
+docker compose up --build
 ```
 
-The application will start on port 8080.
+## Architecture
+
+```
+src/main/java/com/kite/trading/
+├── KiteTradingApplication.java          # @EnableScheduling entry point
+├── config/
+│   ├── NseConfig.java                   # NSE API WebClient
+│   ├── TelegramConfig.java              # Telegram API WebClient
+│   ├── StartupHealthCheck.java          # Startup connectivity checks
+│   └── ...
+├── dto/
+│   ├── OiDataSnapshot.java              # OI snapshot (PCR, totals, buildup)
+│   ├── OiAnalysisResult.java            # Prediction result + trade recommendation
+│   ├── OptionChainData.java             # NSE API response DTO
+│   └── ...
+├── scheduler/
+│   └── IntradayOiScheduler.java         # 6-min fixed rate + cron reset/summary
+└── service/
+    ├── OiAnalysisService.java           # Core OI analysis engine
+    ├── NseOptionChainClient.java        # NSE API client
+    ├── TelegramService.java             # Telegram messaging (interface + impl)
+    ├── ZerodhaApiClient.java            # Kite trade API (order/quote)
+    └── ...
+```
+
+### Data Flow
+
+```
+NSE API ──► NseOptionChainClient ──► OiAnalysisService ──► TelegramService
+         (every 6 min)                  │                        │
+                                        ├─ snapshots (in-memory)  ├─ OI updates
+                                        ├─ direction prediction   ├─ 10 AM prediction
+                                        ├─ exit signal check      ├─ exit alerts
+                                        └─ trade recommendation
+```
+
+## Telegram Messages
+
+| Trigger | Content |
+|---------|---------|
+| **Startup** | Application initialized — NSE & Telegram OK |
+| **10 AM Prediction** | Direction, confidence %, PCR, strategy, strikes, trade recommendation with expiries |
+| **OI Update** (6 min) | Current PCR, PE/CE OI + change, top buildup strikes (skipped if change < thresholds) |
+| **Exit Signal** | Reason (PCR shift / direction reversal), current PCR/Nifty, **fresh recommendation** |
+| **Market Close** | Summary of the day's OI data |
+
+### Thresholds (noise reduction)
+
+- PCR must change by ≥ 0.05
+- PE or CE OI must change by ≥ 5%
+- Both must be exceeded for a periodic OI update notification
+
+## Scheduler Schedule
+
+| Time | Action |
+|------|--------|
+| 9:00 AM | Reset daily state, clear snapshots |
+| 9:30 AM | `shouldRun()` enables — health check, Telegram startup message |
+| 9:30 AM – 10:00 AM | OI snapshots recorded every 6 minutes |
+| 10:00 AM | `analyzeAndPredict()` → direction prediction sent via Telegram |
+| 10:00 AM – 3:30 PM | OI snapshots + exit monitoring every 6 minutes |
+| 3:30 PM | Market close summary |
+| Weekends | `shouldRun()` returns `false`, no activity |
 
 ## API Endpoints
 
-### Authentication
-
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/v1/auth/login-url` | Get the Kite Connect login URL (open in browser) |
-| GET | `/api/v1/auth/callback` | OAuth redirect handler — exchanges `request_token` for session |
-| POST | `/api/v1/auth/session` | Exchange `request_token` for API session (manual) |
-| POST | `/api/v1/auth/logout` | Logout and invalidate session |
-| GET | `/api/v1/auth/status` | Check authentication status |
-
-### Positions
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/v1/positions` | Get all active positions |
-| GET | `/api/v1/positions/nifty/intraday` | Get NIFTY intraday positions |
-| GET | `/api/v1/positions/net` | Get net positions |
-| GET | `/api/v1/positions/day` | Get day trading positions |
-
-### Health Check
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/actuator/health` | Application health status |
-
-## Usage Examples
-
-### Step 1: Get Login URL
-
-```bash
-curl http://localhost:8080/api/v1/auth/login-url
-```
-
-Response:
-```json
-{
-  "login_url": "https://kite.zerodha.com/connect/login?api_key=your-api-key&v3=1"
-}
-```
-
-Open the returned URL in a browser, log in with your Zerodha credentials and TOTP. After successful login, the browser redirects to your redirect URL with a `request_token` query parameter.
-
-### Step 2: Generate Session
-
-```bash
-curl -X POST http://localhost:8080/api/v1/auth/session \
-  -H "Content-Type: application/json" \
-  -d '{
-    "request_token": "your-request-token-from-redirect"
-  }'
-```
-
-### Get All Positions
-
-```bash
-curl http://localhost:8080/api/v1/positions
-```
-
-### Get NIFTY Intraday Positions
-
-```bash
-curl http://localhost:8080/api/v1/positions/nifty/intraday
-```
-
-### Check Authentication Status
-
-```bash
-curl http://localhost:8080/api/v1/auth/status
-```
-
-### Logout
-
-```bash
-curl -X POST http://localhost:8080/api/v1/auth/logout
-```
-
-## Running with Docker
-
-### Build and Run with Docker Compose
-
-1. Create your `.env` file with credentials
-2. Run the following commands:
-
-```bash
-# Build and start the container
-docker-compose up --build
-
-# Run in detached mode
-docker-compose up -d
-
-# View logs
-docker-compose logs -f
-
-# Stop the container
-docker-compose down
-```
-
-### Build Docker Image Manually
-
-```bash
-# Build the image
-docker build -t kite-trading:latest .
-
-# Run the container
-docker run -d \
-  --name kite-trading \
-  -p 8080:8080 \
-  -e KITE_API_KEY=your-api-key \
-  -e KITE_API_SECRET=your-api-secret \
-  kite-trading:latest
-```
-
-### Check Container Status
-
-```bash
-# List running containers
-docker ps
-
-# View container logs
-docker logs kite-trading
-
-# Check health status
-docker inspect --format='{{.State.Health.Status}}' kite-trading
-```
+| GET | `/api/v1/auth/login-url` | Kite Connect login URL |
+| GET | `/api/v1/auth/callback` | OAuth redirect handler |
+| POST | `/api/v1/auth/session` | Exchange `request_token` for session |
+| GET | `/api/v1/positions` | All active positions |
+| GET | `/api/v1/positions/nifty/intraday` | NIFTY intraday positions |
+| GET | `/actuator/health` | Health check |
 
 ## Configuration
 
@@ -259,180 +134,77 @@ docker inspect --format='{{.State.Health.Status}}' kite-trading
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `KITE_API_KEY` | Yes | - | Your Zerodha API key |
-| `KITE_API_SECRET` | Yes | - | Your Zerodha API secret (used for checksum) |
-| `KITE_BASE_URL` | No | `https://api.kite.trade` | Kite REST API base URL |
-| `KITE_LOGIN_URL` | No | `https://kite.zerodha.com/connect/login` | Kite Connect login URL |
-| `KITE_REDIRECT_URL` | No | `http://localhost:8080/api/v1/auth/callback` | OAuth redirect URL |
-| `LOG_HTTP_URL` | No | *(empty)* | Remote HTTP endpoint for log forwarding (JSON POST) |
-| `LOG_HTTP_LEVEL` | No | `WARN` | Minimum level for forwarded logs (e.g. `WARN`, `ERROR`) |
-
-### Application Properties
-
-Key application properties in `application.properties`:
-
-```properties
-# Server port
-server.port=8080
-
-# Actuator endpoints
-management.endpoints.web.exposure.include=health,info
-
-# Logging levels
-logging.level.com.kite.trading=INFO
-
-# HTTP log forwarding (optional)
-logging.http.url=https://logs.example.com/ingest
-logging.http.level=WARN
-```
-
-### HTTP Log Forwarding
-
-Logs at `WARN` level and above can be forwarded as JSON to a remote HTTP endpoint.
-This is useful for centralised log aggregation.
-
-| Property | Environment Variable | Description |
-|----------|---------------------|-------------|
-| `logging.http.url` | `LOG_HTTP_URL` | Target URL for JSON log POSTs |
-| `logging.http.level` | `LOG_HTTP_LEVEL` | Minimum log level to forward |
-
-The appender runs on a background thread (via Logback's `AsyncAppender`) so network
-latency never blocks the application. When `logging.http.url` is empty the forwarder
-is completely disabled.
+| `KITE_API_KEY` | Yes | — | Zerodha API key |
+| `KITE_API_SECRET` | Yes | — | Zerodha API secret |
+| `TELEGRAM_BOT_TOKEN` | Yes | — | Telegram bot token (from @BotFather) |
+| `TELEGRAM_CHAT_ID` | Yes | — | Target chat/group ID |
+| `NSE_OPTION_CHAIN_URL` | No | `https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY` | NSE API URL |
+| `NSE_HOME_URL` | No | `https://www.nseindia.com` | NSE homepage (for cookie) |
+| `KITE_BASE_URL` | No | `https://api.kite.trade` | Kite REST API base |
+| `KITE_LOGIN_URL` | No | `https://kite.zerodha.com/connect/login` | Kite Connect login |
+| `KITE_REDIRECT_URL` | No | `http://localhost:8080/api/v1/auth/callback` | OAuth redirect |
+| `LOG_HTTP_URL` | No | *(empty)* | HTTP log forwarding endpoint |
+| `LOG_HTTP_LEVEL` | No | `WARN` | Min level for forwarded logs |
 
 ## Development
 
-### Building for Development
-
 ```bash
-# Clean build
-./gradlew clean build
+# Build
+./gradlew build
 
 # Run tests
 ./gradlew test
 
-# Run with debug logging
-./gradlew bootRun --args='--logging.level.com.kite.trading=DEBUG'
+# Run locally
+./gradlew bootRun
+
+# Docker Compose (local dev)
+docker compose up --build
+
+# Build image manually
+docker build -t kite-trading:latest .
+
+# Tag for your registry
+docker tag kite-trading:latest sharadprsn/kite-trading:latest
+docker tag kite-trading:latest sharadprsn/kite-trading:1.0.0
+
+# Push to registry
+docker push your-registry/kite-trading:latest
+docker push your-registry/kite-trading:1.0.0
+
+# Run from registry (after push)
+docker run -d --name kite-trading -p 8080:8080 --env-file .env your-registry/kite-trading:latest
 ```
 
-### Code Quality
+> **Note**: Replace `your-registry` with your actual Docker registry (e.g., `docker.io/username`, `ghcr.io/username`, or a private registry). Login first with `docker login` if required.
 
-The application follows these standards:
+### Tests (32 tests)
 
-- Java 21 features
-- SOLID principles
-- Constructor dependency injection
-- Immutable DTOs (Java records)
-- Comprehensive Javadoc documentation
-- Structured logging with SLF4J
+| Test file | Tests | Covers |
+|-----------|-------|--------|
+| `OiAnalysisServiceTest` | 17 | PCR, ATM filter, direction prediction, thresholds, position lifecycle, reset |
+| `IntradayOiSchedulerTest` | 5 | shouldRun guard, reset, close summary, error handling |
+| `StartupHealthCheckTest` | 4 | NSE/Telegram success and failure paths |
+| `TelegramServiceTest` | 1 | Bot connectivity (manual) |
+| `KiteTradingApplicationTests` | 1 | Context load |
 
-## Error Handling
+## Project Conventions
 
-The application provides consistent error responses:
+- Java 21, Spring Boot 3.4.x, Gradle 9.x
+- Constructor injection, immutable DTOs (Java records)
+- JUnit 5 + Mockito for tests (≥80% coverage target)
+- Structured logging via SLF4J
+- No `var` keyword, no heavy dependencies without explicit need
 
-```json
-{
-  "error": "AUTHENTICATION_ERROR",
-  "message": "Login failed: Invalid credentials",
-  "timestamp": "2024-01-15T10:30:00"
-}
-```
+## oiAnalysisService Constants
 
-### Error Types
-
-| Error Type | HTTP Status | Description |
-|------------|-------------|-------------|
-| `AUTHENTICATION_ERROR` | 401 | Login or token issues |
-| `API_ERROR` | 502 | Zerodha API communication errors |
-| `INTERNAL_ERROR` | 500 | Unexpected server errors |
-
-## Testing
-
-### Unit Tests
-
-```bash
-./gradlew test
-```
-
-### Integration Tests
-
-```bash
-./gradlew integrationTest
-```
-
-### Test Coverage
-
-Generate test coverage report:
-
-```bash
-./gradlew jacocoTestReport
-```
-
-## Security Considerations
-
-- Never commit `.env` files or credentials to version control
-- Use environment variables for sensitive configuration
-- The application uses HTTPS for all external API calls
-- Session tokens are stored in memory only
-- Docker container runs as non-root user
-
-## Performance
-
-- WebClient used for non-blocking HTTP requests
-- Connection pooling configured for optimal performance
-- Response caching can be added for frequently accessed data
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Authentication Failed**
-   - Verify your API credentials
-   - Ensure TOTP is synchronized
-   - Check if your account is active
-
-2. **Connection Timeout**
-   - Check network connectivity
-   - Verify Zerodha API status
-   - Increase timeout in WebClient config
-
-3. **Docker Build Fails**
-   - Ensure Docker daemon is running
-   - Check available disk space
-   - Verify Dockerfile syntax
-
-### Logs
-
-View application logs:
-
-```bash
-# Docker logs
-docker logs -f kite-trading
-
-# Local logs
-tail -f logs/kite-trading.log
-```
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- [Zerodha Kite API](https://kite.trade/connect/documentation) for the trading API
-- [Spring Boot](https://spring.io/projects/spring-boot) for the framework
-- [Project Reactor](https://projectreactor.io/) for reactive programming support
-
-## Support
-
-For support, email your-email@example.com or create an issue in the repository.
-#   t r a d i n g c o  
- 
+| Constant | Value | Purpose |
+|----------|-------|---------|
+| `PCR_BULLISH_THRESHOLD` | 1.2 | PCR above this is bullish |
+| `PCR_BEARISH_THRESHOLD` | 0.8 | PCR below this is bearish |
+| `EXIT_PCR_SHIFT` | 0.3 | PCR shift from entry triggers exit |
+| `MIN_PCR_CHANGE_FOR_NOTIFICATION` | 0.05 | Min PCR change to send Telegram update |
+| `MIN_OI_CHANGE_FRACTION` | 0.05 | Min OI change fraction (5%) |
+| `NEAR_STRIKE_RANGE` | 5 | ATM ± 5 strikes (11 strikes total) |
+| `STRIKE_INTERVAL` | 50 | Nifty strike interval (50 points) |
+| `TOP_STRIKES_COUNT` | 5 | Top OI buildup strikes to track |
