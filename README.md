@@ -34,9 +34,9 @@ Edit `.env` with your credentials:
 ```env
 KITE_API_KEY=your-api-key
 KITE_API_SECRET=your-api-secret
-
 TELEGRAM_BOT_TOKEN=your-bot-token
 TELEGRAM_CHAT_ID=your-chat-id
+APP_BASE_URL=https://80.225.215.99
 ```
 
 ### 2. Run
@@ -45,7 +45,7 @@ TELEGRAM_CHAT_ID=your-chat-id
 ./gradlew bootRun
 ```
 
-The app starts on port 8080. Check the logs — you should see a Telegram startup message.
+The app starts on port 443 (HTTPS). Check the logs — you should see a Telegram startup message.
 
 ### 3. Docker
 
@@ -119,14 +119,14 @@ NSE API ──► NseOptionChainClient ──► OiAnalysisService ──► Tel
 
 ## API Endpoints
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/v1/auth/login-url` | Kite Connect login URL |
-| GET | `/api/v1/auth/callback` | OAuth redirect handler |
-| POST | `/api/v1/auth/session` | Exchange `request_token` for session |
-| GET | `/api/v1/positions` | All active positions |
-| GET | `/api/v1/positions/nifty/intraday` | NIFTY intraday positions |
-| GET | `/actuator/health` | Health check |
+| Method | URL | Description |
+|--------|-----|-------------|
+| GET | `https://80.225.215.99/api/v1/auth/login-url` | Kite Connect login URL |
+| GET | `https://80.225.215.99/api/v1/auth/callback` | OAuth redirect handler |
+| POST | `https://80.225.215.99/api/v1/auth/session` | Exchange `request_token` for session |
+| GET | `https://80.225.215.99/api/v1/positions` | All active positions |
+| GET | `https://80.225.215.99/api/v1/positions/nifty/intraday` | NIFTY intraday positions |
+| GET | `https://80.225.215.99/actuator/health` | Health check |
 
 ## Configuration
 
@@ -142,7 +142,12 @@ NSE API ──► NseOptionChainClient ──► OiAnalysisService ──► Tel
 | `NSE_HOME_URL` | No | `https://www.nseindia.com` | NSE homepage (for cookie) |
 | `KITE_BASE_URL` | No | `https://api.kite.trade` | Kite REST API base |
 | `KITE_LOGIN_URL` | No | `https://kite.zerodha.com/connect/login` | Kite Connect login |
-| `KITE_REDIRECT_URL` | No | `http://localhost:8080/api/v1/auth/callback` | OAuth redirect |
+| `APP_BASE_URL` | No | `https://localhost:443` | Server base URL (Telegram login link) |
+| `KITE_REDIRECT_URL` | No | `https://localhost:443/api/v1/auth/callback` | OAuth redirect |
+| `SERVER_SSL_KEY_STORE` | No | `keystore.p12` | SSL keystore path |
+| `SERVER_SSL_KEY_STORE_PASSWORD` | No | `changeme` | SSL keystore password |
+| `SERVER_SSL_KEY_STORE_TYPE` | No | `PKCS12` | SSL keystore type |
+| `SERVER_SSL_KEY_ALIAS` | No | `tomcat` | SSL certificate alias |
 | `LOG_HTTP_URL` | No | *(empty)* | HTTP log forwarding endpoint |
 | `LOG_HTTP_LEVEL` | No | `WARN` | Min level for forwarded logs |
 
@@ -173,19 +178,18 @@ docker push sharadprsn/kite-trading:latest
 docker push sharadprsn/kite-trading:1.0.0
 
 # Run from registry (after push)
-docker run -d --name kite-trading -p 8080:8080 --env-file .env sharadprsn/kite-trading:latest
+docker run -d --name kite-trading -p 443:443 --env-file .env sharadprsn/kite-trading:latest
 ```
 
 > **Note**: Replace `your-registry` with your actual Docker registry (e.g., `docker.io/username`, `ghcr.io/username`, or a private registry). Login first with `docker login` if required.
 
-### Tests (32 tests)
+### Tests (33 tests)
 
 | Test file | Tests | Covers |
 |-----------|-------|--------|
 | `OiAnalysisServiceTest` | 17 | PCR, ATM filter, direction prediction, thresholds, position lifecycle, reset |
-| `IntradayOiSchedulerTest` | 5 | shouldRun guard, reset, close summary, error handling |
+| `IntradayOiSchedulerTest` | 7 | shouldRun guard, reset, close summary, login URL, error handling |
 | `StartupHealthCheckTest` | 4 | NSE/Telegram success and failure paths |
-| `TelegramServiceTest` | 1 | Bot connectivity (manual) |
 | `KiteTradingApplicationTests` | 1 | Context load |
 
 ## Project Conventions
