@@ -1,6 +1,5 @@
 package com.kite.trading.service;
 
-import com.kite.trading.dto.HistoricalDataResponse;
 import com.kite.trading.dto.OrderRequest;
 import com.kite.trading.dto.OrderResponse;
 import com.kite.trading.dto.PositionsResponse;
@@ -36,21 +35,6 @@ public interface ZerodhaApiClient {
      * @return PositionsResponse containing net and day positions
      */
     PositionsResponse getPositions(String accessToken);
-
-    /**
-     * Fetches historical OHLC data for a given instrument and interval.
-     *
-     * @param accessToken     A valid access token for the authenticated user
-     * @param apiKey          The API key for authorization header
-     * @param instrumentToken The instrument token to fetch data for
-     * @param interval        The candle interval (e.g. "15minute", "day")
-     * @param from            ISO date-time for range start
-     * @param to              ISO date-time for range end
-     * @return HistoricalDataResponse containing the candle array
-     */
-    HistoricalDataResponse getHistoricalData(String accessToken, String apiKey,
-                                             String instrumentToken, String interval,
-                                             String from, String to);
 
     /**
      * Fetches the LTP quote for a given instrument.

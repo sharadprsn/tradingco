@@ -12,12 +12,15 @@ import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
@@ -33,8 +36,12 @@ public class OiAnalysisService {
     private static final BigDecimal PCR_BEARISH_THRESHOLD = BigDecimal.valueOf(0.8);
     private static final BigDecimal OI_CHANGE_SIGNIFICANCE = BigDecimal.valueOf(20);
     private static final int TOP_STRIKES_COUNT = 5;
+    private static final int NEAR_STRIKE_RANGE = 5;
+    private static final int STRIKE_INTERVAL = 50;
     private static final BigDecimal EXIT_PCR_SHIFT = BigDecimal.valueOf(0.3);
     private static final BigDecimal EXIT_OI_SURGE = BigDecimal.valueOf(50);
+    private static final BigDecimal MIN_PCR_CHANGE_FOR_NOTIFICATION = BigDecimal.valueOf(0.05);
+    private static final BigDecimal MIN_OI_CHANGE_FRACTION = BigDecimal.valueOf(0.05);
 
     private final NseOptionChainClient nseClient;
     private final TelegramService telegramService;
@@ -42,6 +49,8 @@ public class OiAnalysisService {
     private final List<OiDataSnapshot> snapshots = new CopyOnWriteArrayList<>();
     private final AtomicReference<OiAnalysisResult> lastAnalysis = new AtomicReference<>();
     private final AtomicReference<OiDataSnapshot> entrySnapshot = new AtomicReference<>();
+    private final AtomicReference<OiDataSnapshot> lastNotifiedSnapshot = new AtomicReference<>();
+    private volatile List<LocalDate> knownExpiryDates = List.of();
     private volatile boolean positionEntered;
     private volatile boolean predictionSentToday;
 
@@ -58,8 +67,23 @@ public class OiAnalysisService {
             return null;
         }
 
+        if (data.records().expiryDates() != null) {
+            this.knownExpiryDates = data.records().expiryDates().stream()
+                    .map(d -> LocalDate.parse(d, DateTimeFormatter.ofPattern("dd-MMM-yyyy", Locale.ENGLISH)))
+                    .sorted()
+                    .toList();
+        }
+
         final List<OptionData> allOptions = data.records().data();
         final BigDecimal underlying = data.records().underlyingValue();
+        if (underlying == null) {
+            logger.warn("Underlying value not available");
+            return null;
+        }
+
+        final BigDecimal atmStrike = roundToNearestStrike(underlying);
+        final BigDecimal minStrike = atmStrike.subtract(BigDecimal.valueOf(NEAR_STRIKE_RANGE * STRIKE_INTERVAL));
+        final BigDecimal maxStrike = atmStrike.add(BigDecimal.valueOf(NEAR_STRIKE_RANGE * STRIKE_INTERVAL));
 
         BigDecimal totalPeOi = BigDecimal.ZERO;
         BigDecimal totalCeOi = BigDecimal.ZERO;
@@ -69,6 +93,11 @@ public class OiAnalysisService {
         final List<OiStrikeInfo> buildUpList = new ArrayList<>();
 
         for (final OptionData option : allOptions) {
+            if (option.strikePrice() == null
+                    || option.strikePrice().compareTo(minStrike) < 0
+                    || option.strikePrice().compareTo(maxStrike) > 0) {
+                continue;
+            }
             if (option.pe() != null) {
                 final BigDecimal oi = safeOi(option.pe().openInterest());
                 final BigDecimal change = safeOi(option.pe().changeinOpenInterest());
@@ -181,10 +210,11 @@ public class OiAnalysisService {
         final String strategy = suggestStrategy(direction, latest, topBuildUpStrikes(latest, "PE"),
                 topBuildUpStrikes(latest, "CE"));
         final List<BigDecimal> suggestedStrikes = pickStrikes(direction, latest);
+        final String tradeRecommendation = buildTradeRecommendation(direction, suggestedStrikes);
 
         final OiAnalysisResult result = new OiAnalysisResult(
                 direction, confidence, latestPcr, strategy,
-                suggestedStrikes, reasoning.toString().strip());
+                suggestedStrikes, reasoning.toString().strip(), tradeRecommendation);
 
         lastAnalysis.set(result);
         logger.info("OI Analysis: direction={}, confidence={}, strategy={}, pcr={}",
@@ -215,13 +245,10 @@ public class OiAnalysisService {
         final OiAnalysisResult analysis = lastAnalysis.get();
         if (analysis != null) {
             final String entryDirection = analysis.direction();
-            final OiDataSnapshot freshSnapshot = fetchAndRecordOi();
-            if (freshSnapshot != null) {
-                final String currentDirection = computeDirection(freshSnapshot);
-                if (!entryDirection.equals(currentDirection) && !"NEUTRAL".equals(currentDirection)) {
-                    logger.warn("Exit signal: Direction changed from {} to {}", entryDirection, currentDirection);
-                    return ExitSignal.DIRECTION_REVERSAL;
-                }
+            final String currentDirection = computeDirection(latest);
+            if (!entryDirection.equals(currentDirection) && !"NEUTRAL".equals(currentDirection)) {
+                logger.warn("Exit signal: Direction changed from {} to {}", entryDirection, currentDirection);
+                return ExitSignal.DIRECTION_REVERSAL;
             }
         }
 
@@ -272,13 +299,23 @@ public class OiAnalysisService {
                 .append("\nConfidence: ").append(result.confidence()).append("%")
                 .append("\nPCR: ").append(result.pcr().setScale(2, RoundingMode.HALF_UP))
                 .append("\n\nSuggested Strategy: ").append(result.suggestedStrategy())
-                .append("\nSuggested Strikes: ").append(result.suggestedStrikes())
-                .append("\n\nReasoning: ").append(result.reasoning());
+                .append("\nSuggested Strikes: ").append(result.suggestedStrikes());
+
+        if (result.tradeRecommendation() != null && !result.tradeRecommendation().isBlank()) {
+            sb.append("\n\nTrade Recommendation:\n").append(result.tradeRecommendation());
+        }
+
+        sb.append("\n\nReasoning: ").append(result.reasoning());
 
         return sb.toString();
     }
 
     public String buildExitReport(final ExitSignal signal, final OiDataSnapshot currentSnapshot) {
+        return buildExitReport(signal, currentSnapshot, null);
+    }
+
+    public String buildExitReport(final ExitSignal signal, final OiDataSnapshot currentSnapshot,
+                                   final OiAnalysisResult newRecommendation) {
         final String message = switch (signal) {
             case PCR_SHIFT -> "PCR has shifted significantly since entry. Consider closing the position.";
             case DIRECTION_REVERSAL -> "Market direction has reversed based on OI data. Consider closing the position.";
@@ -293,6 +330,22 @@ public class OiAnalysisService {
             sb.append("\n\nCurrent PCR: ")
                     .append(currentSnapshot.pcr().setScale(2, RoundingMode.HALF_UP))
                     .append("\nCurrent Nifty: ").append(currentSnapshot.underlyingValue());
+        }
+
+        if (newRecommendation != null) {
+            final String emoji = switch (newRecommendation.direction()) {
+                case "BULLISH" -> "\uD83D\uDFE2";
+                case "BEARISH" -> "\uD83D\uDD34";
+                default -> "\uD83D\uDFE1";
+            };
+            sb.append("\n\n\uD83D\uDD04 New Recommendation:")
+                    .append("\n").append(emoji).append(" Direction: ").append(newRecommendation.direction())
+                    .append(" (").append(newRecommendation.confidence()).append("%)")
+                    .append("\nStrategy: ").append(newRecommendation.suggestedStrategy());
+            if (newRecommendation.tradeRecommendation() != null
+                    && !newRecommendation.tradeRecommendation().isBlank()) {
+                sb.append("\n").append(newRecommendation.tradeRecommendation());
+            }
         }
 
         return sb.toString();
@@ -313,17 +366,55 @@ public class OiAnalysisService {
 
     public void notifyOiUpdate() {
         final OiDataSnapshot snapshot = fetchAndRecordOi();
-        if (snapshot != null) {
-            final String report = buildOiReport(snapshot);
-            telegramService.sendMessage(report);
+        if (snapshot == null) {
+            return;
         }
+
+        final OiDataSnapshot lastNotified = lastNotifiedSnapshot.get();
+        if (lastNotified != null && !hasChangedSignificantly(snapshot, lastNotified)) {
+            logger.debug("OI change below notification threshold, skipping");
+            return;
+        }
+
+        final String report = buildOiReport(snapshot);
+        telegramService.sendMessage(report);
+        lastNotifiedSnapshot.set(snapshot);
+    }
+
+    private boolean hasChangedSignificantly(final OiDataSnapshot current, final OiDataSnapshot previous) {
+        final BigDecimal pcrDiff = current.pcr().subtract(previous.pcr()).abs();
+        if (pcrDiff.compareTo(MIN_PCR_CHANGE_FOR_NOTIFICATION) > 0) {
+            return true;
+        }
+
+        final BigDecimal peOiChange = safeOi(current.totalPeOiChange()).abs()
+                .subtract(safeOi(previous.totalPeOiChange()).abs()).abs();
+        final BigDecimal ceOiChange = safeOi(current.totalCeOiChange()).abs()
+                .subtract(safeOi(previous.totalCeOiChange()).abs()).abs();
+
+        final BigDecimal prevPeOi = safeOi(previous.totalPeOi());
+        if (prevPeOi.compareTo(BigDecimal.ZERO) > 0
+                && peOiChange.divide(prevPeOi, 4, RoundingMode.HALF_UP)
+                        .compareTo(MIN_OI_CHANGE_FRACTION) > 0) {
+            return true;
+        }
+
+        final BigDecimal prevCeOi = safeOi(previous.totalCeOi());
+        if (prevCeOi.compareTo(BigDecimal.ZERO) > 0
+                && ceOiChange.divide(prevCeOi, 4, RoundingMode.HALF_UP)
+                        .compareTo(MIN_OI_CHANGE_FRACTION) > 0) {
+            return true;
+        }
+
+        return false;
     }
 
     public void notifyExitIfNeeded() {
         final ExitSignal signal = checkExitSignal();
         if (signal != ExitSignal.NONE) {
             final OiDataSnapshot current = snapshots.isEmpty() ? null : snapshots.getLast();
-            final String report = buildExitReport(signal, current);
+            final OiAnalysisResult newRecommendation = analyzeAndPredict();
+            final String report = buildExitReport(signal, current, newRecommendation);
             telegramService.sendMessage(report);
         }
     }
@@ -344,6 +435,7 @@ public class OiAnalysisService {
         snapshots.clear();
         lastAnalysis.set(null);
         entrySnapshot.set(null);
+        lastNotifiedSnapshot.set(null);
         positionEntered = false;
         predictionSentToday = false;
         logger.info("OI Analysis Service reset");
@@ -363,6 +455,42 @@ public class OiAnalysisService {
 
     public boolean isPredictionSentToday() {
         return predictionSentToday;
+    }
+
+    private String buildTradeRecommendation(final String direction, final List<BigDecimal> strikes) {
+        if (knownExpiryDates.isEmpty() || strikes.isEmpty()) {
+            return "";
+        }
+
+        final DateTimeFormatter fmt = DateTimeFormatter.ofPattern("dd-MMM", Locale.ENGLISH);
+        final String nearExpiry = knownExpiryDates.getFirst().format(fmt);
+        final String farExpiry = knownExpiryDates.size() > 1
+                ? knownExpiryDates.get(1).format(fmt)
+                : nearExpiry;
+
+        return switch (direction) {
+            case "BULLISH" -> {
+                final BigDecimal sellStrike = strikes.get(0);
+                final BigDecimal hedgeStrike = strikes.size() > 1 ? strikes.get(1) : sellStrike;
+                yield String.format("SELL %s PE (%s) | HEDGE: BUY %s PE (%s)",
+                        sellStrike, nearExpiry, hedgeStrike, farExpiry);
+            }
+            case "BEARISH" -> {
+                final BigDecimal sellStrike = strikes.get(0);
+                final BigDecimal hedgeStrike = strikes.size() > 1 ? strikes.get(1) : sellStrike;
+                yield String.format("SELL %s CE (%s) | HEDGE: BUY %s CE (%s)",
+                        sellStrike, nearExpiry, hedgeStrike, farExpiry);
+            }
+            case "NEUTRAL" -> {
+                if (strikes.size() < 4) {
+                    yield "SELL PE & CE (" + nearExpiry + ")";
+                }
+                yield String.format("SELL %s PE & %s CE (%s) | HEDGE: BUY %s PE & %s CE (%s)",
+                        strikes.get(0), strikes.get(2), nearExpiry,
+                        strikes.get(1), strikes.get(3), farExpiry);
+            }
+            default -> "";
+        };
     }
 
     private String suggestStrategy(final String direction, final OiDataSnapshot latest,
@@ -386,37 +514,39 @@ public class OiAnalysisService {
         }
 
         final BigDecimal atm = roundToNearestStrike(underlying);
+        final BigDecimal twoStrikesDown = BigDecimal.valueOf(2L * STRIKE_INTERVAL);
+        final BigDecimal oneStrike = BigDecimal.valueOf(STRIKE_INTERVAL);
 
         switch (direction) {
             case "BULLISH" -> {
                 final BigDecimal putStrike = topBuildUpStrikes(latest, "PE").stream()
                         .filter(s -> s.compareTo(atm) < 0)
                         .findFirst()
-                        .orElse(atm.subtract(BigDecimal.valueOf(100)));
+                        .orElse(atm.subtract(twoStrikesDown));
                 strikes.add(putStrike);
-                strikes.add(putStrike.subtract(BigDecimal.valueOf(50)));
+                strikes.add(putStrike.subtract(oneStrike));
             }
             case "BEARISH" -> {
                 final BigDecimal callStrike = topBuildUpStrikes(latest, "CE").stream()
                         .filter(s -> s.compareTo(atm) > 0)
                         .findFirst()
-                        .orElse(atm.add(BigDecimal.valueOf(100)));
+                        .orElse(atm.add(twoStrikesDown));
                 strikes.add(callStrike);
-                strikes.add(callStrike.add(BigDecimal.valueOf(50)));
+                strikes.add(callStrike.add(oneStrike));
             }
             default -> {
                 final BigDecimal putStrike = topBuildUpStrikes(latest, "PE").stream()
                         .filter(s -> s.compareTo(atm) < 0)
                         .findFirst()
-                        .orElse(atm.subtract(BigDecimal.valueOf(100)));
+                        .orElse(atm.subtract(twoStrikesDown));
                 final BigDecimal callStrike = topBuildUpStrikes(latest, "CE").stream()
                         .filter(s -> s.compareTo(atm) > 0)
                         .findFirst()
-                        .orElse(atm.add(BigDecimal.valueOf(100)));
+                        .orElse(atm.add(twoStrikesDown));
                 strikes.add(putStrike);
-                strikes.add(putStrike.subtract(BigDecimal.valueOf(50)));
+                strikes.add(putStrike.subtract(oneStrike));
                 strikes.add(callStrike);
-                strikes.add(callStrike.add(BigDecimal.valueOf(50)));
+                strikes.add(callStrike.add(oneStrike));
             }
         }
 
@@ -470,9 +600,8 @@ public class OiAnalysisService {
     }
 
     private BigDecimal roundToNearestStrike(final BigDecimal price) {
-        final int interval = 50;
-        final BigDecimal divided = price.divide(BigDecimal.valueOf(interval), 0, RoundingMode.HALF_UP);
-        return divided.multiply(BigDecimal.valueOf(interval));
+        final BigDecimal divided = price.divide(BigDecimal.valueOf(STRIKE_INTERVAL), 0, RoundingMode.HALF_UP);
+        return divided.multiply(BigDecimal.valueOf(STRIKE_INTERVAL));
     }
 
     public enum ExitSignal {

@@ -1,7 +1,6 @@
 package com.kite.trading.service;
 
 import com.kite.trading.config.KiteConfig;
-import com.kite.trading.dto.HistoricalDataResponse;
 import com.kite.trading.dto.OrderRequest;
 import com.kite.trading.dto.OrderResponse;
 import com.kite.trading.dto.PositionsResponse;
@@ -108,35 +107,6 @@ public class ZerodhaApiClientImpl implements ZerodhaApiClient {
             logger.error("Failed to fetch positions", e);
             throw new KiteApiException(
                     "Failed to fetch positions: " + e.getMessage(), e);
-        }
-    }
-
-    @Override
-    public HistoricalDataResponse getHistoricalData(final String accessToken, final String apiKey,
-                                                    final String instrumentToken, final String interval,
-                                                    final String from, final String to) {
-        logger.info("Fetching historical data for instrument: {}", instrumentToken);
-
-        try {
-            final String url = kiteConfig.getBaseUrl()
-                    + "/instruments/historical/" + instrumentToken + "/" + interval
-                    + "?from=" + from + "&to=" + to;
-            final String authHeader = "token " + apiKey + ":" + accessToken;
-
-            return webClient.get()
-                    .uri(url)
-                    .header("Authorization", authHeader)
-                    .header("X-Kite-Version", "3")
-                    .retrieve()
-                    .onStatus(HttpStatusCode::isError, this::handleErrorResponse)
-                    .bodyToMono(HistoricalDataResponse.class)
-                    .block();
-        } catch (final KiteApiException e) {
-            throw e;
-        } catch (final Exception e) {
-            logger.error("Failed to fetch historical data", e);
-            throw new KiteApiException(
-                    "Failed to fetch historical data: " + e.getMessage(), e);
         }
     }
 

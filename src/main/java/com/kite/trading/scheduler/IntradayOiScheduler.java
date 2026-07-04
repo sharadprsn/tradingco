@@ -91,7 +91,7 @@ public class IntradayOiScheduler {
         predictionExecutedToday = false;
     }
 
-    private boolean shouldRun() {
+    boolean shouldRun() {
         final LocalTime now = LocalTime.now(IST);
         final DayOfWeek day = LocalDate.now(IST).getDayOfWeek();
         if (day == DayOfWeek.SATURDAY || day == DayOfWeek.SUNDAY) {
