@@ -1,8 +1,12 @@
 package com.kite.trading.service;
 
 import com.kite.trading.config.KiteConfig;
-import com.kite.trading.dto.SessionResponse;
+import com.kite.trading.dto.HistoricalDataResponse;
+import com.kite.trading.dto.OrderRequest;
+import com.kite.trading.dto.OrderResponse;
 import com.kite.trading.dto.PositionsResponse;
+import com.kite.trading.dto.QuoteResponse;
+import com.kite.trading.dto.SessionResponse;
 import com.kite.trading.exception.KiteApiException;
 import com.kite.trading.exception.KiteAuthenticationException;
 import org.slf4j.Logger;
@@ -104,6 +108,118 @@ public class ZerodhaApiClientImpl implements ZerodhaApiClient {
             logger.error("Failed to fetch positions", e);
             throw new KiteApiException(
                     "Failed to fetch positions: " + e.getMessage(), e);
+        }
+    }
+
+    @Override
+    public HistoricalDataResponse getHistoricalData(final String accessToken, final String apiKey,
+                                                    final String instrumentToken, final String interval,
+                                                    final String from, final String to) {
+        logger.info("Fetching historical data for instrument: {}", instrumentToken);
+
+        try {
+            final String url = kiteConfig.getBaseUrl()
+                    + "/instruments/historical/" + instrumentToken + "/" + interval
+                    + "?from=" + from + "&to=" + to;
+            final String authHeader = "token " + apiKey + ":" + accessToken;
+
+            return webClient.get()
+                    .uri(url)
+                    .header("Authorization", authHeader)
+                    .header("X-Kite-Version", "3")
+                    .retrieve()
+                    .onStatus(HttpStatusCode::isError, this::handleErrorResponse)
+                    .bodyToMono(HistoricalDataResponse.class)
+                    .block();
+        } catch (final KiteApiException e) {
+            throw e;
+        } catch (final Exception e) {
+            logger.error("Failed to fetch historical data", e);
+            throw new KiteApiException(
+                    "Failed to fetch historical data: " + e.getMessage(), e);
+        }
+    }
+
+    @Override
+    public QuoteResponse getQuote(final String accessToken, final String apiKey,
+                                  final String instrumentToken) {
+        logger.info("Fetching quote for instrument: {}", instrumentToken);
+
+        try {
+            final String url = kiteConfig.getBaseUrl() + "/instruments/" + instrumentToken + "/quote";
+            final String authHeader = "token " + apiKey + ":" + accessToken;
+
+            return webClient.get()
+                    .uri(url)
+                    .header("Authorization", authHeader)
+                    .header("X-Kite-Version", "3")
+                    .retrieve()
+                    .onStatus(HttpStatusCode::isError, this::handleErrorResponse)
+                    .bodyToMono(QuoteResponse.class)
+                    .block();
+        } catch (final KiteApiException e) {
+            throw e;
+        } catch (final Exception e) {
+            logger.error("Failed to fetch quote", e);
+            throw new KiteApiException(
+                    "Failed to fetch quote: " + e.getMessage(), e);
+        }
+    }
+
+    @Override
+    public OrderResponse placeOrder(final String accessToken, final String apiKey,
+                                    final String variety, final OrderRequest orderRequest) {
+        logger.info("Placing {} order for symbol: {}", variety, orderRequest.tradingSymbol());
+
+        try {
+            final String url = kiteConfig.getBaseUrl() + "/orders/" + variety;
+            final String authHeader = "token " + apiKey + ":" + accessToken;
+
+            return webClient.post()
+                    .uri(url)
+                    .header("Authorization", authHeader)
+                    .header("X-Kite-Version", "3")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .bodyValue(orderRequest)
+                    .retrieve()
+                    .onStatus(HttpStatusCode::isError, this::handleErrorResponse)
+                    .bodyToMono(OrderResponse.class)
+                    .block();
+        } catch (final KiteApiException e) {
+            throw e;
+        } catch (final Exception e) {
+            logger.error("Failed to place order", e);
+            throw new KiteApiException(
+                    "Failed to place order: " + e.getMessage(), e);
+        }
+    }
+
+    @Override
+    public OrderResponse modifyOrder(final String accessToken, final String apiKey,
+                                     final String variety, final String orderId,
+                                     final OrderRequest orderRequest) {
+        logger.info("Modifying order {} for symbol: {}", orderId, orderRequest.tradingSymbol());
+
+        try {
+            final String url = kiteConfig.getBaseUrl() + "/orders/" + variety + "/" + orderId;
+            final String authHeader = "token " + apiKey + ":" + accessToken;
+
+            return webClient.put()
+                    .uri(url)
+                    .header("Authorization", authHeader)
+                    .header("X-Kite-Version", "3")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .bodyValue(orderRequest)
+                    .retrieve()
+                    .onStatus(HttpStatusCode::isError, this::handleErrorResponse)
+                    .bodyToMono(OrderResponse.class)
+                    .block();
+        } catch (final KiteApiException e) {
+            throw e;
+        } catch (final Exception e) {
+            logger.error("Failed to modify order", e);
+            throw new KiteApiException(
+                    "Failed to modify order: " + e.getMessage(), e);
         }
     }
 

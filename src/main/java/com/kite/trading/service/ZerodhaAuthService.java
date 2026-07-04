@@ -115,6 +115,17 @@ public class ZerodhaAuthService implements KiteAuthService {
      * {@inheritDoc}
      */
     @Override
+    public String getAccessToken() {
+        if (currentSession == null) {
+            return null;
+        }
+        return currentSession.accessToken();
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public boolean isAuthenticated() {
         return currentSession != null && currentSession.accessToken() != null;
     }

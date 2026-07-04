@@ -57,6 +57,13 @@ public interface KiteAuthService {
     KiteSession getCurrentSession();
 
     /**
+     * Returns the current access token if authenticated.
+     *
+     * @return The access token, or {@code null} if not authenticated
+     */
+    String getAccessToken();
+
+    /**
      * Checks whether an authenticated session currently exists.
      *
      * @return {@code true} if there is an active session, {@code false} otherwise
