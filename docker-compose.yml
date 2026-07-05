@@ -1,10 +1,6 @@
-version: '3.8'
-
 services:
   kite-trading:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: sharadprsn/kite-trading:latest
     container_name: kite-trading
     ports:
       - "443:443"

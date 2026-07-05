@@ -31,18 +31,18 @@ RUN addgroup -S spring && adduser -S spring -G spring
 COPY --from=build /app/build/libs/kite-trading-1.0.0.jar app.jar
 COPY keystore.p12 keystore.p12
 
-# Change ownership to non-root user
-RUN chown spring:spring app.jar keystore.p12
+# Create logs directory and change ownership to non-root user
+RUN mkdir -p /app/logs && chown spring:spring app.jar keystore.p12 /app/logs
 
 # Switch to non-root user
 USER spring
 
 # Expose port
-EXPOSE 8080
+EXPOSE 443
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=30s --retries=3 \
-  CMD wget -q --spider http://localhost:8080/actuator/health || exit 1
+  CMD wget -q --spider http://localhost:443/actuator/health || exit 1
 
 # Run the application
 ENTRYPOINT ["java", "-jar", "app.jar"]
