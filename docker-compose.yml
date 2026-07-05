@@ -14,7 +14,7 @@ services:
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
       - TELEGRAM_BASE_URL=${TELEGRAM_BASE_URL:-https://api.telegram.org}
     volumes:
-      - ./logs:/app/logs
+      - kite-logs:/app/logs
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:443/actuator/health"]
@@ -22,3 +22,6 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+volumes:
+  kite-logs:
