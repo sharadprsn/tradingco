@@ -16,6 +16,9 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.ZoneId;
+import java.time.temporal.ChronoUnit;
+import java.time.Duration;
+import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -43,6 +46,17 @@ public class OiAnalysisService {
     private static final BigDecimal MIN_PCR_CHANGE_FOR_NOTIFICATION = BigDecimal.valueOf(0.05);
     private static final BigDecimal MIN_OI_CHANGE_FRACTION = BigDecimal.valueOf(0.05);
 
+    // === Exit strategy improvement constants ===
+    private static final int CONFIRMATION_CONSECUTIVE = 2;
+    private static final int PCR_VOLATILITY_WINDOW = 8;
+    private static final BigDecimal PCR_VOLATILITY_MULTIPLIER = BigDecimal.valueOf(2);
+    private static final int DIRECTION_ROLLING_WINDOW = 3;
+    private static final long EXIT_COOLDOWN_MINUTES = 30;
+    private static final BigDecimal EXIT_CONFIDENCE_THRESHOLD = BigDecimal.valueOf(50);
+    private static final BigDecimal PRICE_CONFIRMATION_PCT = BigDecimal.valueOf(0.5);
+    private static final int DAYS_TO_EXPIRY_DAMPENING = 2;
+    private static final BigDecimal TIME_DECAY_FACTOR = BigDecimal.valueOf(1.5);
+
     private final OptionChainClient optionChainClient;
     private final TelegramService telegramService;
 
@@ -53,6 +67,13 @@ public class OiAnalysisService {
     private volatile List<LocalDate> knownExpiryDates = List.of();
     private volatile boolean positionEntered;
     private volatile boolean predictionSentToday;
+
+    // === Exit strategy improvement state ===
+    private volatile ExitSignal lastDetectedSignal = ExitSignal.NONE;
+    private volatile int confirmationStreak;
+    private volatile BigDecimal entryPrice = BigDecimal.ZERO;
+    private volatile String entryDirection = "NEUTRAL";
+    private volatile Instant lastExitFiredAt = Instant.MIN;
 
     public OiAnalysisService(final OptionChainClient optionChainClient,
                              final TelegramService telegramService) {
@@ -316,15 +337,32 @@ public class OiAnalysisService {
 
     public String buildExitReport(final ExitSignal signal, final OiDataSnapshot currentSnapshot,
                                    final OiAnalysisResult newRecommendation) {
-        final String message = switch (signal) {
+        return buildExitReport(new ExitAssessment(signal, BigDecimal.ZERO, BigDecimal.ZERO),
+                currentSnapshot, newRecommendation);
+    }
+
+    public String buildExitReport(final ExitAssessment assessment, final OiDataSnapshot currentSnapshot,
+                                   final OiAnalysisResult newRecommendation) {
+        final String message = switch (assessment.signal()) {
             case PCR_SHIFT -> "PCR has shifted significantly since entry. Consider closing the position.";
             case DIRECTION_REVERSAL -> "Market direction has reversed based on OI data. Consider closing the position.";
+            case OI_SURGE -> "OI volume surge detected. Consider closing the position.";
             default -> "No exit signal.";
         };
 
         final StringBuilder sb = new StringBuilder();
         sb.append("\u26A0\uFE0F EXIT SIGNAL DETECTED \u26A0\uFE0F")
                 .append("\n\n").append(message);
+
+        if (assessment.confidence().compareTo(BigDecimal.ZERO) > 0) {
+            sb.append("\nConfidence: ").append(assessment.confidence()).append("%");
+        }
+        if (assessment.exitFraction().compareTo(BigDecimal.ZERO) > 0
+                && assessment.exitFraction().compareTo(BigDecimal.ONE) < 0) {
+            sb.append("\nSuggested Exit: ").append(
+                    assessment.exitFraction().multiply(BigDecimal.valueOf(100)).setScale(0))
+                    .append("% of position");
+        }
 
         if (currentSnapshot != null) {
             sb.append("\n\nCurrent PCR: ")
@@ -410,19 +448,39 @@ public class OiAnalysisService {
     }
 
     public void notifyExitIfNeeded() {
-        final ExitSignal signal = checkExitSignal();
-        if (signal != ExitSignal.NONE) {
+        final ExitAssessment assessment = computeExitAssessment();
+        if (assessment.signal() != ExitSignal.NONE) {
             final OiDataSnapshot current = snapshots.isEmpty() ? null : snapshots.getLast();
             final OiAnalysisResult newRecommendation = analyzeAndPredict();
-            final String report = buildExitReport(signal, current, newRecommendation);
+            final String report = buildExitReport(assessment, current, newRecommendation);
             telegramService.sendMessage(report);
+            lastExitFiredAt = Instant.now();
+            confirmationStreak = 0;
+            lastDetectedSignal = ExitSignal.NONE;
+
+            if (assessment.exitFraction().compareTo(BigDecimal.ONE) >= 0) {
+                logger.warn("Full exit signal fired: {} (confidence: {}%)",
+                        assessment.signal(), assessment.confidence());
+            } else {
+                logger.warn("Partial exit signal fired: {} (confidence: {}%, fraction: {}%)",
+                        assessment.signal(), assessment.confidence(),
+                        assessment.exitFraction().multiply(BigDecimal.valueOf(100)));
+            }
         }
     }
 
     public void markPositionEntered() {
         this.positionEntered = true;
-        this.entrySnapshot.set(snapshots.isEmpty() ? null : snapshots.getLast());
-        logger.info("Position entry recorded for OI monitoring");
+        final OiDataSnapshot current = snapshots.isEmpty() ? null : snapshots.getLast();
+        this.entrySnapshot.set(current);
+        if (current != null) {
+            this.entryPrice = current.underlyingValue();
+            this.entryDirection = computeDirection(current);
+        }
+        this.confirmationStreak = 0;
+        this.lastDetectedSignal = ExitSignal.NONE;
+        logger.info("Position entry recorded for OI monitoring at price={} direction={}",
+                entryPrice, entryDirection);
     }
 
     public void markPositionExited() {
@@ -438,6 +496,11 @@ public class OiAnalysisService {
         lastNotifiedSnapshot.set(null);
         positionEntered = false;
         predictionSentToday = false;
+        lastDetectedSignal = ExitSignal.NONE;
+        confirmationStreak = 0;
+        entryPrice = BigDecimal.ZERO;
+        entryDirection = "NEUTRAL";
+        lastExitFiredAt = Instant.MIN;
         logger.info("OI Analysis Service reset");
     }
 
@@ -605,6 +668,189 @@ public class OiAnalysisService {
     }
 
     public enum ExitSignal {
-        NONE, PCR_SHIFT, DIRECTION_REVERSAL
+        NONE, PCR_SHIFT, DIRECTION_REVERSAL, OI_SURGE
+    }
+
+    public record ExitAssessment(ExitSignal signal, BigDecimal confidence, BigDecimal exitFraction) {
+        public static final ExitAssessment NONE = new ExitAssessment(ExitSignal.NONE, BigDecimal.ZERO, BigDecimal.ZERO);
+    }
+
+    private ExitAssessment computeExitAssessment() {
+        if (!positionEntered || snapshots.size() < 2) {
+            return ExitAssessment.NONE;
+        }
+
+        final OiDataSnapshot entry = entrySnapshot.get();
+        final OiDataSnapshot latest = snapshots.getLast();
+        if (entry == null || latest == null) {
+            return ExitAssessment.NONE;
+        }
+
+        if (isInCooldown()) {
+            return ExitAssessment.NONE;
+        }
+
+        final BigDecimal dynamicThreshold = computeDynamicPcrThreshold()
+                .multiply(getTimeDecayFactor())
+                .max(EXIT_PCR_SHIFT);
+        final BigDecimal pcrShift = latest.pcr().subtract(entry.pcr()).abs();
+        final boolean pcrShiftTriggered = pcrShift.compareTo(dynamicThreshold) > 0;
+
+        final BigDecimal totalOiChange = latest.totalPeOiChange().abs()
+                .add(latest.totalCeOiChange().abs());
+        final boolean oiSurgeTriggered = totalOiChange.compareTo(EXIT_OI_SURGE) > 0;
+
+        final String currentDir = computeRollingDirection();
+        final boolean directionReversalTriggered = !entryDirection.equals(currentDir)
+                && !"NEUTRAL".equals(currentDir);
+
+        final ExitSignal primarySignal;
+        if (pcrShiftTriggered) {
+            primarySignal = ExitSignal.PCR_SHIFT;
+        } else if (directionReversalTriggered) {
+            primarySignal = ExitSignal.DIRECTION_REVERSAL;
+        } else if (oiSurgeTriggered) {
+            primarySignal = ExitSignal.OI_SURGE;
+        } else {
+            confirmationStreak = 0;
+            lastDetectedSignal = ExitSignal.NONE;
+            return ExitAssessment.NONE;
+        }
+
+        if (primarySignal == lastDetectedSignal) {
+            confirmationStreak++;
+        } else {
+            confirmationStreak = 1;
+            lastDetectedSignal = primarySignal;
+            logger.info("Exit signal detected (pending confirmation): {} (streak {}/{})",
+                    primarySignal, confirmationStreak, CONFIRMATION_CONSECUTIVE);
+            return ExitAssessment.NONE;
+        }
+
+        if (confirmationStreak < CONFIRMATION_CONSECUTIVE) {
+            logger.info("Exit signal pending confirmation: {} (streak {}/{})",
+                    primarySignal, confirmationStreak, CONFIRMATION_CONSECUTIVE);
+            return ExitAssessment.NONE;
+        }
+
+        if (!isPriceConfirmed(latest, entry)) {
+            logger.debug("Exit signal suppressed: price movement insufficient for confirmation");
+            return ExitAssessment.NONE;
+        }
+
+        final BigDecimal confidence = computeConfidence(primarySignal, pcrShift, dynamicThreshold,
+                directionReversalTriggered, oiSurgeTriggered);
+        final BigDecimal exitFraction = computeExitFraction(primarySignal, pcrShift, dynamicThreshold);
+
+        logger.warn("Exit signal confirmed: {} (confidence: {}%, exit fraction: {}%)",
+                primarySignal, confidence, exitFraction.multiply(BigDecimal.valueOf(100)));
+
+        return new ExitAssessment(primarySignal, confidence, exitFraction);
+    }
+
+    private BigDecimal computeDynamicPcrThreshold() {
+        if (snapshots.size() < PCR_VOLATILITY_WINDOW + 1) {
+            return EXIT_PCR_SHIFT;
+        }
+        BigDecimal sumAbsChange = BigDecimal.ZERO;
+        final int end = snapshots.size();
+        final int start = end - PCR_VOLATILITY_WINDOW;
+        for (int i = start; i < end; i++) {
+            sumAbsChange = sumAbsChange.add(
+                    snapshots.get(i).pcr().subtract(snapshots.get(i - 1).pcr()).abs());
+        }
+        final BigDecimal avgAbsChange = sumAbsChange.divide(
+                BigDecimal.valueOf(PCR_VOLATILITY_WINDOW), 4, RoundingMode.HALF_UP);
+        return avgAbsChange.multiply(PCR_VOLATILITY_MULTIPLIER).max(BigDecimal.valueOf(0.1));
+    }
+
+    private BigDecimal getTimeDecayFactor() {
+        if (knownExpiryDates.isEmpty()) {
+            return BigDecimal.ONE;
+        }
+        final long daysToExpiry = ChronoUnit.DAYS.between(
+                LocalDate.now(IST), knownExpiryDates.getFirst());
+        if (daysToExpiry <= DAYS_TO_EXPIRY_DAMPENING && daysToExpiry >= 0) {
+            return TIME_DECAY_FACTOR;
+        }
+        return BigDecimal.ONE;
+    }
+
+    private String computeRollingDirection() {
+        if (snapshots.size() < DIRECTION_ROLLING_WINDOW) {
+            return computeDirection(snapshots.getLast());
+        }
+        BigDecimal sumPeChange = BigDecimal.ZERO;
+        BigDecimal sumCeChange = BigDecimal.ZERO;
+        final int start = Math.max(0, snapshots.size() - DIRECTION_ROLLING_WINDOW);
+        for (int i = start; i < snapshots.size(); i++) {
+            sumPeChange = sumPeChange.add(snapshots.get(i).totalPeOiChange());
+            sumCeChange = sumCeChange.add(snapshots.get(i).totalCeOiChange());
+        }
+        final BigDecimal total = sumPeChange.abs().add(sumCeChange.abs());
+        if (total.compareTo(BigDecimal.ZERO) == 0) {
+            return "NEUTRAL";
+        }
+        final BigDecimal pePct = sumPeChange.abs().multiply(BigDecimal.valueOf(100))
+                .divide(total, 2, RoundingMode.HALF_UP);
+        if (pePct.compareTo(BigDecimal.valueOf(60)) > 0 && sumPeChange.compareTo(BigDecimal.ZERO) > 0) {
+            return "BULLISH";
+        }
+        if (pePct.compareTo(BigDecimal.valueOf(40)) < 0 && sumCeChange.compareTo(BigDecimal.ZERO) > 0) {
+            return "BEARISH";
+        }
+        return "NEUTRAL";
+    }
+
+    private boolean isPriceConfirmed(final OiDataSnapshot latest, final OiDataSnapshot entry) {
+        if (entry.underlyingValue() == null || entry.underlyingValue().compareTo(BigDecimal.ZERO) == 0) {
+            return true;
+        }
+        final BigDecimal priceChangePct = latest.underlyingValue().subtract(entry.underlyingValue())
+                .abs().multiply(BigDecimal.valueOf(100))
+                .divide(entry.underlyingValue(), 2, RoundingMode.HALF_UP);
+        return priceChangePct.compareTo(PRICE_CONFIRMATION_PCT) >= 0;
+    }
+
+    private boolean isInCooldown() {
+        if (lastExitFiredAt == Instant.MIN) {
+            return false;
+        }
+        return Duration.between(lastExitFiredAt, Instant.now())
+                .toMinutes() < EXIT_COOLDOWN_MINUTES;
+    }
+
+    private BigDecimal computeConfidence(final ExitSignal signal, final BigDecimal pcrShift,
+                                          final BigDecimal dynamicThreshold,
+                                          final boolean directionReversal,
+                                          final boolean oiSurge) {
+        final BigDecimal baseConfidence = switch (signal) {
+            case PCR_SHIFT -> {
+                final BigDecimal ratio = pcrShift.divide(dynamicThreshold, 2, RoundingMode.HALF_UP);
+                yield BigDecimal.valueOf(30).add(
+                        ratio.multiply(BigDecimal.valueOf(40)).min(BigDecimal.valueOf(50)));
+            }
+            case DIRECTION_REVERSAL -> BigDecimal.valueOf(70);
+            case OI_SURGE -> BigDecimal.valueOf(55);
+            default -> BigDecimal.ZERO;
+        };
+        int signalCount = 0;
+        if (pcrShift.compareTo(EXIT_PCR_SHIFT) > 0) signalCount++;
+        if (directionReversal) signalCount++;
+        if (oiSurge) signalCount++;
+        final BigDecimal boost = BigDecimal.valueOf(signalCount > 1 ? 15 : 0);
+        return baseConfidence.add(boost).min(BigDecimal.valueOf(95));
+    }
+
+    private BigDecimal computeExitFraction(final ExitSignal signal, final BigDecimal pcrShift,
+                                            final BigDecimal dynamicThreshold) {
+        if (signal == ExitSignal.PCR_SHIFT) {
+            final BigDecimal ratio = pcrShift.divide(dynamicThreshold, 2, RoundingMode.HALF_UP);
+            if (ratio.compareTo(BigDecimal.valueOf(1.5)) >= 0) {
+                return BigDecimal.ONE;
+            }
+            return BigDecimal.valueOf(0.5);
+        }
+        return BigDecimal.ONE;
     }
 }
