@@ -32,6 +32,24 @@
 
     <!--
       ====================================================================
+      File appender  –  writes to logs/ directory in the current working
+      directory (e.g. the container working directory /app).
+      ====================================================================
+    -->
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>logs/kite-trading.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+            <fileNamePattern>logs/kite-trading.%d{yyyy-MM-dd}.log</fileNamePattern>
+            <maxHistory>30</maxHistory>
+            <totalSizeCap>1GB</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!--
+      ====================================================================
       HTTP appender  –  forwards logs to a remote endpoint as JSON
       ====================================================================
       Only active when logging.http.url is set to a non-empty value.
@@ -60,6 +78,7 @@
     -->
     <root level="INFO">
         <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="FILE"/>
         <appender-ref ref="HTTP"/>
     </root>
 

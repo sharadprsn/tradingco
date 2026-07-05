@@ -7,7 +7,7 @@ services:
       dockerfile: Dockerfile
     container_name: kite-trading
     ports:
-      - "8080:8080"
+      - "443:443"
     environment:
       - KITE_API_KEY=${KITE_API_KEY}
       - KITE_API_SECRET=${KITE_API_SECRET}
@@ -17,9 +17,11 @@ services:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
       - TELEGRAM_BASE_URL=${TELEGRAM_BASE_URL:-https://api.telegram.org}
+    volumes:
+      - ./logs:/app/logs
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/actuator/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:443/actuator/health"]
       interval: 30s
       timeout: 10s
       retries: 3
