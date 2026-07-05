@@ -24,18 +24,15 @@ FROM eclipse-temurin:21-jre-alpine
 # Set working directory
 WORKDIR /app
 
-# Create non-root user for security
-RUN addgroup -S spring && adduser -S spring -G spring
+# Create non-root user for security and install su-exec for user switching
+RUN addgroup -S spring && adduser -S spring -G spring && apk add --no-cache su-exec
 
 # Copy the built JAR and keystore from build stage
 COPY --from=build /app/build/libs/kite-trading-1.0.0.jar app.jar
 COPY keystore.p12 keystore.p12
 
-# Create logs directory and change ownership to non-root user
-RUN mkdir -p /app/logs && chown spring:spring app.jar keystore.p12 /app/logs
-
-# Switch to non-root user
-USER spring
+# Create logs directory
+RUN mkdir -p /app/logs && chown spring:spring app.jar keystore.p12
 
 # Expose port
 EXPOSE 443
@@ -44,5 +41,5 @@ EXPOSE 443
 HEALTHCHECK --interval=30s --timeout=3s --start-period=30s --retries=3 \
   CMD wget -q --spider http://localhost:443/actuator/health || exit 1
 
-# Run the application - ensure logs directory exists before starting
-ENTRYPOINT ["/bin/sh", "-c", "mkdir -p /app/logs && exec java -jar app.jar"]
+# Ensure logs directory is writable, then run as spring user
+ENTRYPOINT ["/bin/sh", "-c", "mkdir -p /app/logs && chmod 777 /app/logs && exec su-exec spring java -jar app.jar"]
