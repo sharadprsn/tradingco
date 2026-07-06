@@ -315,7 +315,7 @@ public class OiAnalysisService {
         };
 
         final StringBuilder sb = new StringBuilder();
-        sb.append(emoji).append(" MARKET PREDICTION (10 AM) ").append(emoji)
+        sb.append(emoji).append(" MARKET PREDICTION (9:45 AM) ").append(emoji)
                 .append("\n\nDirection: ").append(result.direction())
                 .append("\nConfidence: ").append(result.confidence()).append("%")
                 .append("\nPCR: ").append(result.pcr().setScale(2, RoundingMode.HALF_UP))

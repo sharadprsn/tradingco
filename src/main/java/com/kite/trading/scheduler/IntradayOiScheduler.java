@@ -19,7 +19,7 @@ public class IntradayOiScheduler {
     private static final Logger logger = LoggerFactory.getLogger(IntradayOiScheduler.class);
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
     private static final LocalTime MARKET_START = LocalTime.of(9, 30);
-    private static final LocalTime PREDICTION_TIME = LocalTime.of(10, 0);
+    private static final LocalTime PREDICTION_TIME = LocalTime.of(9, 45);
     private static final LocalTime MARKET_CLOSE = LocalTime.of(15, 30);
     private static final int SIX_MINUTES_MS = 360_000;
 
@@ -50,7 +50,7 @@ public class IntradayOiScheduler {
             if (isPastPredictionTime && !predictionExecutedToday) {
                 oiAnalysisService.notifyPrediction();
                 predictionExecutedToday = true;
-                logger.info("10 AM prediction executed and sent via Telegram");
+                logger.info("9:45 AM prediction executed and sent via Telegram");
             }
 
             if (oiAnalysisService.isPositionEntered()) {
