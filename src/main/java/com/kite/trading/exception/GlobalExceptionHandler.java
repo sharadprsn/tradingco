@@ -61,12 +61,10 @@ public class GlobalExceptionHandler {
      * @return ResponseEntity with 404 Not Found status
      */
     @ExceptionHandler(NoResourceFoundException.class)
-    public ResponseEntity<ErrorResponse> handleNoResourceFound(
+    public ResponseEntity<Void> handleNoResourceFound(
             final NoResourceFoundException ex) {
         logger.debug("Resource not found: {}", ex.getMessage());
-        return ResponseEntity
-                .status(HttpStatus.NOT_FOUND)
-                .body(ErrorResponse.of("NOT_FOUND", ex.getMessage()));
+        return ResponseEntity.notFound().build();
     }
 
     /**

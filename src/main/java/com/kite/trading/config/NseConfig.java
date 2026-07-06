@@ -7,8 +7,9 @@ import org.springframework.context.annotation.Configuration;
 @ConfigurationProperties(prefix = "nse")
 public class NseConfig {
 
-    private String optionChainUrl = "https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY";
-    private String homeUrl = "https://www.nseindia.com";
+    private String optionChainUrl = "https://www.nseindia.com/api/option-chain-v3?type=Indices&symbol=NIFTY";
+    private String contractInfoUrl = "https://www.nseindia.com/api/option-chain-contract-info?symbol=NIFTY";
+    private String homeUrl = "https://www.nseindia.com/option-chain";
     private String userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
     public NseConfig() {
@@ -28,6 +29,14 @@ public class NseConfig {
 
     public void setHomeUrl(final String homeUrl) {
         this.homeUrl = homeUrl;
+    }
+
+    public String getContractInfoUrl() {
+        return contractInfoUrl;
+    }
+
+    public void setContractInfoUrl(final String contractInfoUrl) {
+        this.contractInfoUrl = contractInfoUrl;
     }
 
     public String getUserAgent() {
