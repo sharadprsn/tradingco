@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Logback configuration for Kite Trading API.
+
+  Spring Boot automatically picks up logback-spring.xml when it is
+  present on the classpath. The <springProperty /> tags read values
+  from application.properties / environment variables so that logging
+  behaviour can be changed without modifying XML.
+-->
+<configuration>
+
+    <!--
+      ====================================================================
+      Spring-managed properties
+      ====================================================================
+    -->
+    <springProperty name="LOG_HTTP_URL"   source="logging.http.url"   defaultValue=""/>
+    <springProperty name="LOG_HTTP_LEVEL" source="logging.http.level" defaultValue="WARN"/>
+    <springProperty name="APP_NAME"       source="spring.application.name"
+                                             defaultValue="kite-trading"/>
+
+    <!--
+      ====================================================================
+      Console appender  –  always active
+      ====================================================================
+    -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} %highlight(%-5level) [%thread] %cyan(%logger{36}) - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!--
+      ====================================================================
+      File appender  –  writes to logs/ directory in the current working
+      directory (e.g. the container working directory /app).
+      ====================================================================
+    -->
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>logs/kite-trading.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+            <fileNamePattern>logs/kite-trading.%d{yyyy-MM-dd}.log</fileNamePattern>
+            <maxHistory>30</maxHistory>
+            <totalSizeCap>1GB</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!--
+      ====================================================================
+      HTTP appender  –  forwards logs to a remote endpoint as JSON
+      ====================================================================
+      Only active when logging.http.url is set to a non-empty value.
+      Wrapped in an AsyncAppender to avoid blocking the application
+      thread during network I/O.
+    -->
+    <appender name="HTTP_RAW" class="com.kite.trading.config.LogbackHttpAppender">
+        <url>${LOG_HTTP_URL}</url>
+        <!-- Only forward events at or above the configured level -->
+        <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
+            <level>${LOG_HTTP_LEVEL}</level>
+        </filter>
+    </appender>
+
+    <appender name="HTTP" class="ch.qos.logback.classic.AsyncAppender">
+        <appender-ref ref="HTTP_RAW"/>
+        <queueSize>1024</queueSize>
+        <neverBlock>true</neverBlock>
+        <discardingThreshold>0</discardingThreshold>
+    </appender>
+
+    <!--
+      ====================================================================
+      Root logger
+      ====================================================================
+    -->
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="FILE"/>
+        <appender-ref ref="HTTP"/>
+    </root>
+
+</configuration>
