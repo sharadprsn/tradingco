@@ -44,7 +44,7 @@ public class IntradayOiScheduler {
         logger.debug("OI scheduler tick at {}", now);
 
         try {
-            oiAnalysisService.notifyOiUpdate();
+            oiAnalysisService.fetchAndRecordOi();
 
             final boolean isPastPredictionTime = !now.isBefore(PREDICTION_TIME);
             if (isPastPredictionTime && !predictionExecutedToday) {
@@ -68,20 +68,11 @@ public class IntradayOiScheduler {
         logger.info("Resetting OI scheduler state for new trading day");
         oiAnalysisService.reset();
         predictionExecutedToday = false;
-        telegramService.sendMessage("OI Scheduler initialized for today's session.");
-    }
-
-    @Scheduled(cron = "0 5 9 * * MON-FRI", zone = "Asia/Kolkata")
-    public void sendLoginUrl() {
-        try {
-            final String baseUrl = System.getenv().getOrDefault("APP_BASE_URL", "https://localhost:443");
-            final String loginEndpoint = baseUrl.replaceAll("/+$", "") + "/api/v1/auth/login-url";
-            final String message = "\uD83D\uDD11 Visit the link below to authenticate with Kite:\n" + loginEndpoint;
-            telegramService.sendMessage(message);
-            logger.info("Kite login URL endpoint sent via Telegram: {}", loginEndpoint);
-        } catch (final Exception e) {
-            logger.error("Failed to send login URL", e);
-        }
+        final String baseUrl = System.getenv().getOrDefault("APP_BASE_URL", "https://localhost:443");
+        final String loginEndpoint = baseUrl.replaceAll("/+$", "") + "/api/v1/auth/login-url";
+        final String message = "\uD83D\uDD11 Authenticate with Kite to start trading:\n" + loginEndpoint;
+        telegramService.sendMessage(message);
+        logger.info("Authentication URL sent via Telegram: {}", loginEndpoint);
     }
 
     @Scheduled(cron = "0 0 16 * * MON-FRI", zone = "Asia/Kolkata")

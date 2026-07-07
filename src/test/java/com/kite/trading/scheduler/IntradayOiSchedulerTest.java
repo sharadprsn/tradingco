@@ -38,7 +38,7 @@ class IntradayOiSchedulerTest {
         scheduler.resetDaily();
 
         verify(oiAnalysisService).reset();
-        verify(telegramService).sendMessage(contains("initialized"));
+        verify(telegramService).sendMessage(contains("Authenticate with Kite"));
     }
 
     @Test
@@ -59,19 +59,5 @@ class IntradayOiSchedulerTest {
     @Test
     void scheduledOiCheck_handlesExceptionGracefully_whenCalled() {
         scheduler.scheduledOiCheck();
-    }
-
-    @Test
-    void sendLoginUrl_sendsViaTelegram() {
-        scheduler.sendLoginUrl();
-
-        verify(telegramService).sendMessage(contains("https://localhost:443/api/v1/auth/login-url"));
-    }
-
-    @Test
-    void sendLoginUrl_includesEndpoint() {
-        scheduler.sendLoginUrl();
-
-        verify(telegramService).sendMessage(contains("/api/v1/auth/login-url"));
     }
 }
