@@ -1,5 +1,7 @@
 package com.kite.trading.service;
 
+import com.kite.trading.dto.IndexQuote;
+import com.kite.trading.dto.IndexQuote.IndexData;
 import com.kite.trading.dto.OiAnalysisResult;
 import com.kite.trading.dto.OiDataSnapshot;
 import com.kite.trading.dto.OiDataSnapshot.OiStrikeInfo;
@@ -57,10 +59,15 @@ public class OiAnalysisService {
     private static final int DAYS_TO_EXPIRY_DAMPENING = 2;
     private static final BigDecimal TIME_DECAY_FACTOR = BigDecimal.valueOf(1.5);
 
+    // === SuperTrend constants (15-min timeframe = 3 snapshots at 6-min intervals) ===
+    private static final int SUPERTREND_PERIOD = 3;
+    private static final BigDecimal SUPERTREND_MULTIPLIER = BigDecimal.valueOf(3);
+
     private final OptionChainClient optionChainClient;
     private final TelegramService telegramService;
 
     private final List<OiDataSnapshot> snapshots = new CopyOnWriteArrayList<>();
+    private final List<CandleData> candleData = new CopyOnWriteArrayList<>();
     private final AtomicReference<OiAnalysisResult> lastAnalysis = new AtomicReference<>();
     private final AtomicReference<OiDataSnapshot> entrySnapshot = new AtomicReference<>();
     private final AtomicReference<OiDataSnapshot> lastNotifiedSnapshot = new AtomicReference<>();
@@ -73,6 +80,7 @@ public class OiAnalysisService {
     private volatile int confirmationStreak;
     private volatile BigDecimal entryPrice = BigDecimal.ZERO;
     private volatile String entryDirection = "NEUTRAL";
+    private volatile String superTrendDirection = "NONE";
     private volatile Instant lastExitFiredAt = Instant.MIN;
 
     public OiAnalysisService(final OptionChainClient optionChainClient,
@@ -165,7 +173,23 @@ public class OiAnalysisService {
             snapshots.remove(0);
         }
 
+        recordCandleData();
+
         return snapshot;
+    }
+
+    private void recordCandleData() {
+        final IndexQuote quote = optionChainClient.fetchIndexQuote();
+        if (quote != null && quote.data() != null && !quote.data().isEmpty()) {
+            final IndexData nifty50 = quote.data().getFirst();
+            if (nifty50.high() != null && nifty50.low() != null) {
+                candleData.add(new CandleData(nifty50.high(), nifty50.low()));
+                if (candleData.size() > 100) {
+                    candleData.remove(0);
+                }
+                logger.debug("Index quote recorded: high={}, low={}", nifty50.high(), nifty50.low());
+            }
+        }
     }
 
     public OiAnalysisResult analyzeAndPredict() {
@@ -346,6 +370,7 @@ public class OiAnalysisService {
         final String message = switch (assessment.signal()) {
             case PCR_SHIFT -> "PCR has shifted significantly since entry. Consider closing the position.";
             case DIRECTION_REVERSAL -> "Market direction has reversed based on OI data. Consider closing the position.";
+            case SUPERTREND_REVERSAL -> "15-min SuperTrend reversal detected. Consider closing the position.";
             case OI_SURGE -> "OI volume surge detected. Consider closing the position.";
             default -> "No exit signal.";
         };
@@ -491,6 +516,7 @@ public class OiAnalysisService {
 
     public void reset() {
         snapshots.clear();
+        candleData.clear();
         lastAnalysis.set(null);
         entrySnapshot.set(null);
         lastNotifiedSnapshot.set(null);
@@ -500,6 +526,7 @@ public class OiAnalysisService {
         confirmationStreak = 0;
         entryPrice = BigDecimal.ZERO;
         entryDirection = "NEUTRAL";
+        superTrendDirection = "NONE";
         lastExitFiredAt = Instant.MIN;
         logger.info("OI Analysis Service reset");
     }
@@ -667,12 +694,75 @@ public class OiAnalysisService {
         return divided.multiply(BigDecimal.valueOf(STRIKE_INTERVAL));
     }
 
+    private record CandleData(BigDecimal high, BigDecimal low) {}
+
     public enum ExitSignal {
-        NONE, PCR_SHIFT, DIRECTION_REVERSAL, OI_SURGE
+        NONE, PCR_SHIFT, DIRECTION_REVERSAL, SUPERTREND_REVERSAL, OI_SURGE
     }
 
     public record ExitAssessment(ExitSignal signal, BigDecimal confidence, BigDecimal exitFraction) {
         public static final ExitAssessment NONE = new ExitAssessment(ExitSignal.NONE, BigDecimal.ZERO, BigDecimal.ZERO);
+    }
+
+    private boolean checkSuperTrendReversal() {
+        if (snapshots.size() < SUPERTREND_PERIOD + 1) {
+            return false;
+        }
+        final String currentDirection = computeSuperTrendDirection();
+        final String previousDirection = superTrendDirection;
+        superTrendDirection = currentDirection;
+        return !"NONE".equals(previousDirection)
+                && !"NONE".equals(currentDirection)
+                && !previousDirection.equals(currentDirection);
+    }
+
+    private String computeSuperTrendDirection() {
+        if (snapshots.size() < SUPERTREND_PERIOD) {
+            return "NONE";
+        }
+
+        final int snapEnd = snapshots.size();
+        final int snapStart = snapEnd - SUPERTREND_PERIOD;
+
+        BigDecimal atr;
+        if (candleData.size() >= SUPERTREND_PERIOD) {
+            final int cEnd = candleData.size();
+            final int cStart = cEnd - SUPERTREND_PERIOD;
+            BigDecimal sumRange = BigDecimal.ZERO;
+            for (int i = cStart; i < cEnd; i++) {
+                sumRange = sumRange.add(candleData.get(i).high().subtract(candleData.get(i).low()));
+            }
+            atr = sumRange.divide(BigDecimal.valueOf(SUPERTREND_PERIOD), 4, RoundingMode.HALF_UP);
+        } else {
+            BigDecimal sumRange = BigDecimal.ZERO;
+            for (int i = snapStart; i < snapEnd - 1; i++) {
+                sumRange = sumRange.add(
+                        snapshots.get(i + 1).underlyingValue()
+                                .subtract(snapshots.get(i).underlyingValue())
+                                .abs());
+            }
+            atr = sumRange.divide(BigDecimal.valueOf(SUPERTREND_PERIOD - 1), 4, RoundingMode.HALF_UP);
+        }
+
+        BigDecimal sumClose = BigDecimal.ZERO;
+        for (int i = snapStart; i < snapEnd; i++) {
+            sumClose = sumClose.add(snapshots.get(i).underlyingValue());
+        }
+        final BigDecimal mid = sumClose.divide(BigDecimal.valueOf(SUPERTREND_PERIOD), 2, RoundingMode.HALF_UP);
+        final BigDecimal band = SUPERTREND_MULTIPLIER.multiply(atr);
+        final BigDecimal close = snapshots.getLast().underlyingValue();
+        final String previous = superTrendDirection;
+        if ("NONE".equals(previous)) {
+            if (close.compareTo(mid.add(band)) > 0) return "BULLISH";
+            if (close.compareTo(mid.subtract(band)) < 0) return "BEARISH";
+            return "NONE";
+        }
+        if ("BULLISH".equals(previous)) {
+            if (close.compareTo(mid.subtract(band)) < 0) return "BEARISH";
+            return "BULLISH";
+        }
+        if (close.compareTo(mid.add(band)) > 0) return "BULLISH";
+        return "BEARISH";
     }
 
     private ExitAssessment computeExitAssessment() {
@@ -704,11 +794,15 @@ public class OiAnalysisService {
         final boolean directionReversalTriggered = !entryDirection.equals(currentDir)
                 && !"NEUTRAL".equals(currentDir);
 
+        final boolean superTrendReversal = checkSuperTrendReversal();
+
         final ExitSignal primarySignal;
         if (pcrShiftTriggered) {
             primarySignal = ExitSignal.PCR_SHIFT;
         } else if (directionReversalTriggered) {
             primarySignal = ExitSignal.DIRECTION_REVERSAL;
+        } else if (superTrendReversal) {
+            primarySignal = ExitSignal.SUPERTREND_REVERSAL;
         } else if (oiSurgeTriggered) {
             primarySignal = ExitSignal.OI_SURGE;
         } else {
@@ -739,7 +833,7 @@ public class OiAnalysisService {
         }
 
         final BigDecimal confidence = computeConfidence(primarySignal, pcrShift, dynamicThreshold,
-                directionReversalTriggered, oiSurgeTriggered);
+                directionReversalTriggered, superTrendReversal, oiSurgeTriggered);
         final BigDecimal exitFraction = computeExitFraction(primarySignal, pcrShift, dynamicThreshold);
 
         logger.warn("Exit signal confirmed: {} (confidence: {}%, exit fraction: {}%)",
@@ -823,6 +917,7 @@ public class OiAnalysisService {
     private BigDecimal computeConfidence(final ExitSignal signal, final BigDecimal pcrShift,
                                           final BigDecimal dynamicThreshold,
                                           final boolean directionReversal,
+                                          final boolean superTrendReversal,
                                           final boolean oiSurge) {
         final BigDecimal baseConfidence = switch (signal) {
             case PCR_SHIFT -> {
@@ -831,12 +926,14 @@ public class OiAnalysisService {
                         ratio.multiply(BigDecimal.valueOf(40)).min(BigDecimal.valueOf(50)));
             }
             case DIRECTION_REVERSAL -> BigDecimal.valueOf(70);
+            case SUPERTREND_REVERSAL -> BigDecimal.valueOf(65);
             case OI_SURGE -> BigDecimal.valueOf(55);
             default -> BigDecimal.ZERO;
         };
         int signalCount = 0;
         if (pcrShift.compareTo(EXIT_PCR_SHIFT) > 0) signalCount++;
         if (directionReversal) signalCount++;
+        if (superTrendReversal) signalCount++;
         if (oiSurge) signalCount++;
         final BigDecimal boost = BigDecimal.valueOf(signalCount > 1 ? 15 : 0);
         return baseConfidence.add(boost).min(BigDecimal.valueOf(95));
@@ -849,6 +946,9 @@ public class OiAnalysisService {
             if (ratio.compareTo(BigDecimal.valueOf(1.5)) >= 0) {
                 return BigDecimal.ONE;
             }
+            return BigDecimal.valueOf(0.5);
+        }
+        if (signal == ExitSignal.SUPERTREND_REVERSAL) {
             return BigDecimal.valueOf(0.5);
         }
         return BigDecimal.ONE;

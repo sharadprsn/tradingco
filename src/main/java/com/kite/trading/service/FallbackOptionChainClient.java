@@ -1,5 +1,6 @@
 package com.kite.trading.service;
 
+import com.kite.trading.dto.IndexQuote;
 import com.kite.trading.dto.OptionChainData;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,6 +51,11 @@ public class FallbackOptionChainClient implements OptionChainClient {
 
         logger.error("Both NSE and Yahoo Finance option chain sources failed");
         return null;
+    }
+
+    @Override
+    public IndexQuote fetchIndexQuote() {
+        return nseClient.fetchIndexQuote();
     }
 
     private static boolean isValid(final OptionChainData data) {

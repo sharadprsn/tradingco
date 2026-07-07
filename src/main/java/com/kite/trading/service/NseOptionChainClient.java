@@ -5,6 +5,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kite.trading.config.NseConfig;
+import com.kite.trading.dto.IndexQuote;
 import com.kite.trading.dto.OptionChainData;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -232,6 +233,25 @@ public class NseOptionChainClient implements OptionChainClient {
                 new OptionChainData.Records(
                         Collections.emptyList(), Collections.emptyList(), "", BigDecimal.ZERO, Collections.emptyList()),
                 new OptionChainData.Filtered(Collections.emptyList(), null, null, Collections.emptyList()));
+    }
+
+    public IndexQuote fetchIndexQuote() {
+        try {
+            logger.debug("Fetching NSE index quote from {}", nseConfig.getIndexQuoteUrl());
+            return webClient.get()
+                    .uri(nseConfig.getIndexQuoteUrl())
+                    .header("User-Agent", nseConfig.getUserAgent())
+                    .header("Accept", MediaType.APPLICATION_JSON_VALUE)
+                    .header("Accept-Language", "en-US,en;q=0.9")
+                    .header("Referer", nseConfig.getHomeUrl())
+                    .header("Cookie", sessionCookie != null ? sessionCookie : "")
+                    .retrieve()
+                    .bodyToMono(IndexQuote.class)
+                    .block();
+        } catch (final Exception e) {
+            logger.error("Failed to fetch NSE index quote: {} {}", e.getClass().getSimpleName(), e.getMessage());
+            return null;
+        }
     }
 
     public void resetSession() {
