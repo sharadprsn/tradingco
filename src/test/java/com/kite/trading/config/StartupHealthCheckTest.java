@@ -26,14 +26,14 @@ class StartupHealthCheckTest {
     private TelegramService telegramService;
 
     @Test
-    void onApplicationReady_checksNseAndTelegram() {
+    void onApplicationReady_checksNse() {
         when(nseClient.fetchOptionChain()).thenReturn(validOptionChain());
 
         final var healthCheck = new StartupHealthCheck(nseClient, telegramService);
         healthCheck.onApplicationReady();
 
         verify(nseClient).fetchOptionChain();
-        verify(telegramService).sendMessage(contains("Kite Trading"));
+        verify(telegramService, never()).sendMessage(anyString());
     }
 
     @Test
@@ -43,7 +43,7 @@ class StartupHealthCheckTest {
         final var healthCheck = new StartupHealthCheck(nseClient, telegramService);
         healthCheck.onApplicationReady();
 
-        verify(telegramService).sendMessage(contains("Kite Trading"));
+        verify(telegramService, never()).sendMessage(anyString());
     }
 
     @Test
@@ -53,19 +53,18 @@ class StartupHealthCheckTest {
         final var healthCheck = new StartupHealthCheck(nseClient, telegramService);
         healthCheck.onApplicationReady();
 
-        verify(telegramService).sendMessage(contains("Kite Trading"));
+        verify(telegramService, never()).sendMessage(anyString());
     }
 
     @Test
-    void onApplicationReady_handlesTelegramFailureGracefully() {
-        when(nseClient.fetchOptionChain()).thenReturn(validOptionChain());
-        doThrow(new RuntimeException("Telegram down")).when(telegramService).sendMessage(anyString());
+    void onApplicationReady_handlesNseFailureGracefullyWhenTelegramUnavailable() {
+        when(nseClient.fetchOptionChain()).thenThrow(new RuntimeException("NSE unavailable"));
 
         final var healthCheck = new StartupHealthCheck(nseClient, telegramService);
         healthCheck.onApplicationReady();
 
         verify(nseClient).fetchOptionChain();
-        verify(telegramService).sendMessage(contains("Kite Trading"));
+        verify(telegramService, never()).sendMessage(anyString());
     }
 
     private static OptionChainData validOptionChain() {

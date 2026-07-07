@@ -53,11 +53,19 @@ public class OiAnalysisService {
     private static final int PCR_VOLATILITY_WINDOW = 8;
     private static final BigDecimal PCR_VOLATILITY_MULTIPLIER = BigDecimal.valueOf(2);
     private static final int DIRECTION_ROLLING_WINDOW = 3;
-    private static final long EXIT_COOLDOWN_MINUTES = 30;
+    private static final long EXIT_COOLDOWN_MINUTES = 15;
     private static final BigDecimal EXIT_CONFIDENCE_THRESHOLD = BigDecimal.valueOf(50);
     private static final BigDecimal PRICE_CONFIRMATION_PCT = BigDecimal.valueOf(0.5);
     private static final int DAYS_TO_EXPIRY_DAMPENING = 2;
     private static final BigDecimal TIME_DECAY_FACTOR = BigDecimal.valueOf(1.5);
+
+    // === Loss mitigation constants ===
+    private static final LocalTime AFTERNOON_THRESHOLD = LocalTime.of(14, 30);
+    private static final BigDecimal HARD_STOP_LOSS_PCT = BigDecimal.valueOf(1.0);
+    private static final BigDecimal TRAILING_STOP_PCT = BigDecimal.valueOf(0.5);
+    private static final BigDecimal LOSS_CAP_PCT = BigDecimal.valueOf(2.0);
+    private static final BigDecimal AFTERNOON_THRESHOLD_MULTIPLIER = BigDecimal.valueOf(0.5);
+    private static final int STRONG_SIGNAL_CONFIRMATION_REQUIRED = 1;
 
     // === SuperTrend constants (15-min timeframe = 3 snapshots at 6-min intervals) ===
     private static final int SUPERTREND_PERIOD = 3;
@@ -82,6 +90,9 @@ public class OiAnalysisService {
     private volatile String entryDirection = "NEUTRAL";
     private volatile String superTrendDirection = "NONE";
     private volatile Instant lastExitFiredAt = Instant.MIN;
+    private volatile BigDecimal highestPriceSinceEntry = BigDecimal.ZERO;
+    private volatile BigDecimal lowestPriceSinceEntry = BigDecimal.ZERO;
+    private volatile boolean earlyWarningSent;
 
     public OiAnalysisService(final OptionChainClient optionChainClient,
                              final TelegramService telegramService) {
@@ -171,6 +182,15 @@ public class OiAnalysisService {
 
         if (snapshots.size() > 100) {
             snapshots.remove(0);
+        }
+
+        if (positionEntered && underlying != null) {
+            if (underlying.compareTo(highestPriceSinceEntry) > 0) {
+                highestPriceSinceEntry = underlying;
+            }
+            if (underlying.compareTo(lowestPriceSinceEntry) < 0) {
+                lowestPriceSinceEntry = underlying;
+            }
         }
 
         recordCandleData();
@@ -479,9 +499,15 @@ public class OiAnalysisService {
             final OiAnalysisResult newRecommendation = analyzeAndPredict();
             final String report = buildExitReport(assessment, current, newRecommendation);
             telegramService.sendMessage(report);
-            lastExitFiredAt = Instant.now();
+
+            final boolean isHardExit = assessment.signal() == ExitSignal.HARD_STOP
+                    || assessment.signal() == ExitSignal.TRAILING_STOP;
+            if (!isHardExit) {
+                lastExitFiredAt = Instant.now();
+            }
             confirmationStreak = 0;
             lastDetectedSignal = ExitSignal.NONE;
+            earlyWarningSent = false;
 
             if (assessment.exitFraction().compareTo(BigDecimal.ONE) >= 0) {
                 logger.warn("Full exit signal fired: {} (confidence: {}%)",
@@ -501,9 +527,12 @@ public class OiAnalysisService {
         if (current != null) {
             this.entryPrice = current.underlyingValue();
             this.entryDirection = computeDirection(current);
+            this.highestPriceSinceEntry = current.underlyingValue();
+            this.lowestPriceSinceEntry = current.underlyingValue();
         }
         this.confirmationStreak = 0;
         this.lastDetectedSignal = ExitSignal.NONE;
+        this.earlyWarningSent = false;
         logger.info("Position entry recorded for OI monitoring at price={} direction={}",
                 entryPrice, entryDirection);
     }
@@ -511,6 +540,9 @@ public class OiAnalysisService {
     public void markPositionExited() {
         this.positionEntered = false;
         this.entrySnapshot.set(null);
+        this.highestPriceSinceEntry = BigDecimal.ZERO;
+        this.lowestPriceSinceEntry = BigDecimal.ZERO;
+        this.earlyWarningSent = false;
         logger.info("Position exit recorded, stopping OI monitoring");
     }
 
@@ -528,6 +560,9 @@ public class OiAnalysisService {
         entryDirection = "NEUTRAL";
         superTrendDirection = "NONE";
         lastExitFiredAt = Instant.MIN;
+        highestPriceSinceEntry = BigDecimal.ZERO;
+        lowestPriceSinceEntry = BigDecimal.ZERO;
+        earlyWarningSent = false;
         logger.info("OI Analysis Service reset");
     }
 
@@ -697,7 +732,8 @@ public class OiAnalysisService {
     private record CandleData(BigDecimal high, BigDecimal low) {}
 
     public enum ExitSignal {
-        NONE, PCR_SHIFT, DIRECTION_REVERSAL, SUPERTREND_REVERSAL, OI_SURGE
+        NONE, PCR_SHIFT, DIRECTION_REVERSAL, SUPERTREND_REVERSAL, OI_SURGE,
+        HARD_STOP, TRAILING_STOP
     }
 
     public record ExitAssessment(ExitSignal signal, BigDecimal confidence, BigDecimal exitFraction) {
@@ -776,12 +812,36 @@ public class OiAnalysisService {
             return ExitAssessment.NONE;
         }
 
+        final BigDecimal currentPrice = latest.underlyingValue();
+
+        if (isHardStopTriggered(currentPrice)) {
+            logger.warn("HARD STOP triggered at price={} (entry={}, direction={})",
+                    currentPrice, entryPrice, entryDirection);
+            return new ExitAssessment(ExitSignal.HARD_STOP, BigDecimal.valueOf(95), BigDecimal.ONE);
+        }
+
+        if (isTrailingStopTriggered(currentPrice)) {
+            logger.warn("TRAILING STOP triggered at price={} (high={}, entry={})",
+                    currentPrice, highestPriceSinceEntry, entryPrice);
+            return new ExitAssessment(ExitSignal.TRAILING_STOP, BigDecimal.valueOf(90), BigDecimal.ONE);
+        }
+
+        if (isLossCapExceeded(currentPrice)) {
+            logger.warn("LOSS CAP exceeded at price={} (entry={}, direction={})",
+                    currentPrice, entryPrice, entryDirection);
+            return new ExitAssessment(ExitSignal.HARD_STOP, BigDecimal.valueOf(95), BigDecimal.ONE);
+        }
+
         if (isInCooldown()) {
             return ExitAssessment.NONE;
         }
 
+        final BigDecimal timeMultiplier = isPastAfternoonThreshold()
+                ? AFTERNOON_THRESHOLD_MULTIPLIER
+                : BigDecimal.ONE;
         final BigDecimal dynamicThreshold = computeDynamicPcrThreshold()
                 .multiply(getTimeDecayFactor())
+                .multiply(timeMultiplier)
                 .max(EXIT_PCR_SHIFT);
         final BigDecimal pcrShift = latest.pcr().subtract(entry.pcr()).abs();
         final boolean pcrShiftTriggered = pcrShift.compareTo(dynamicThreshold) > 0;
@@ -796,7 +856,14 @@ public class OiAnalysisService {
 
         final boolean superTrendReversal = checkSuperTrendReversal();
 
+        final boolean isStrongSignal = (pcrShiftTriggered && directionReversalTriggered)
+                || (pcrShiftTriggered && superTrendReversal)
+                || pcrShift.compareTo(dynamicThreshold.multiply(BigDecimal.valueOf(2))) > 0;
+
         final ExitSignal primarySignal;
+        int requiredConfirmations = isStrongSignal
+                ? STRONG_SIGNAL_CONFIRMATION_REQUIRED
+                : CONFIRMATION_CONSECUTIVE;
         if (pcrShiftTriggered) {
             primarySignal = ExitSignal.PCR_SHIFT;
         } else if (directionReversalTriggered) {
@@ -816,30 +883,124 @@ public class OiAnalysisService {
         } else {
             confirmationStreak = 1;
             lastDetectedSignal = primarySignal;
+            sendEarlyWarning(primarySignal, currentPrice);
             logger.info("Exit signal detected (pending confirmation): {} (streak {}/{})",
-                    primarySignal, confirmationStreak, CONFIRMATION_CONSECUTIVE);
+                    primarySignal, confirmationStreak, requiredConfirmations);
             return ExitAssessment.NONE;
         }
 
-        if (confirmationStreak < CONFIRMATION_CONSECUTIVE) {
+        if (confirmationStreak < requiredConfirmations) {
             logger.info("Exit signal pending confirmation: {} (streak {}/{})",
-                    primarySignal, confirmationStreak, CONFIRMATION_CONSECUTIVE);
-            return ExitAssessment.NONE;
-        }
-
-        if (!isPriceConfirmed(latest, entry)) {
-            logger.debug("Exit signal suppressed: price movement insufficient for confirmation");
+                    primarySignal, confirmationStreak, requiredConfirmations);
             return ExitAssessment.NONE;
         }
 
         final BigDecimal confidence = computeConfidence(primarySignal, pcrShift, dynamicThreshold,
-                directionReversalTriggered, superTrendReversal, oiSurgeTriggered);
+                directionReversalTriggered, superTrendReversal, oiSurgeTriggered,
+                currentPrice, entry);
         final BigDecimal exitFraction = computeExitFraction(primarySignal, pcrShift, dynamicThreshold);
 
         logger.warn("Exit signal confirmed: {} (confidence: {}%, exit fraction: {}%)",
                 primarySignal, confidence, exitFraction.multiply(BigDecimal.valueOf(100)));
 
         return new ExitAssessment(primarySignal, confidence, exitFraction);
+    }
+
+    private boolean isHardStopTriggered(final BigDecimal currentPrice) {
+        if (entryPrice == null || entryPrice.compareTo(BigDecimal.ZERO) == 0) {
+            return false;
+        }
+        final BigDecimal priceMovePct = currentPrice.subtract(entryPrice).abs()
+                .multiply(BigDecimal.valueOf(100))
+                .divide(entryPrice, 2, RoundingMode.HALF_UP);
+        final boolean adverseMove;
+        if ("BULLISH".equals(entryDirection)) {
+            adverseMove = currentPrice.compareTo(entryPrice) < 0
+                    && priceMovePct.compareTo(HARD_STOP_LOSS_PCT) >= 0;
+        } else if ("BEARISH".equals(entryDirection)) {
+            adverseMove = currentPrice.compareTo(entryPrice) > 0
+                    && priceMovePct.compareTo(HARD_STOP_LOSS_PCT) >= 0;
+        } else {
+            adverseMove = priceMovePct.compareTo(HARD_STOP_LOSS_PCT) >= 0;
+        }
+        return adverseMove;
+    }
+
+    private boolean isTrailingStopTriggered(final BigDecimal currentPrice) {
+        if (entryPrice == null || entryPrice.compareTo(BigDecimal.ZERO) == 0
+                || highestPriceSinceEntry.compareTo(BigDecimal.ZERO) == 0) {
+            return false;
+        }
+        if ("BULLISH".equals(entryDirection)) {
+            final BigDecimal pullback = highestPriceSinceEntry.subtract(currentPrice)
+                    .multiply(BigDecimal.valueOf(100))
+                    .divide(highestPriceSinceEntry, 2, RoundingMode.HALF_UP);
+            return pullback.compareTo(TRAILING_STOP_PCT) >= 0
+                    && currentPrice.compareTo(entryPrice) > 0;
+        }
+        if ("BEARISH".equals(entryDirection)) {
+            final BigDecimal pullback = currentPrice.subtract(lowestPriceSinceEntry)
+                    .multiply(BigDecimal.valueOf(100))
+                    .divide(lowestPriceSinceEntry, 2, RoundingMode.HALF_UP);
+            return pullback.compareTo(TRAILING_STOP_PCT) >= 0
+                    && currentPrice.compareTo(entryPrice) < 0;
+        }
+        return false;
+    }
+
+    private boolean isLossCapExceeded(final BigDecimal currentPrice) {
+        if (entryPrice == null || entryPrice.compareTo(BigDecimal.ZERO) == 0) {
+            return false;
+        }
+        final BigDecimal lossPct = estimateUnrealizedLossPct(currentPrice);
+        return lossPct.compareTo(LOSS_CAP_PCT) >= 0;
+    }
+
+    private BigDecimal estimateUnrealizedLossPct(final BigDecimal currentPrice) {
+        if (entryPrice == null || entryPrice.compareTo(BigDecimal.ZERO) == 0) {
+            return BigDecimal.ZERO;
+        }
+        if ("BULLISH".equals(entryDirection)) {
+            if (currentPrice.compareTo(entryPrice) >= 0) return BigDecimal.ZERO;
+            return entryPrice.subtract(currentPrice).multiply(BigDecimal.valueOf(100))
+                    .divide(entryPrice, 2, RoundingMode.HALF_UP);
+        }
+        if ("BEARISH".equals(entryDirection)) {
+            if (currentPrice.compareTo(entryPrice) <= 0) return BigDecimal.ZERO;
+            return currentPrice.subtract(entryPrice).multiply(BigDecimal.valueOf(100))
+                    .divide(entryPrice, 2, RoundingMode.HALF_UP);
+        }
+        return BigDecimal.ZERO;
+    }
+
+    private boolean isPastAfternoonThreshold() {
+        return !LocalTime.now(IST).isBefore(AFTERNOON_THRESHOLD);
+    }
+
+    private void sendEarlyWarning(final ExitSignal signal, final BigDecimal currentPrice) {
+        if (earlyWarningSent) {
+            return;
+        }
+        final String message = switch (signal) {
+            case PCR_SHIFT ->
+                "\u26A0\uFE0F EARLY WARNING: PCR shift detected (pending confirmation). Monitor closely.";
+            case DIRECTION_REVERSAL ->
+                "\u26A0\uFE0F EARLY WARNING: Direction reversal detected (pending confirmation). Monitor closely.";
+            case SUPERTREND_REVERSAL ->
+                "\u26A0\uFE0F EARLY WARNING: SuperTrend reversal detected (pending confirmation). Monitor closely.";
+            case OI_SURGE ->
+                "\u26A0\uFE0F EARLY WARNING: OI volume surge detected (pending confirmation). Monitor closely.";
+            default -> "";
+        };
+        if (!message.isBlank()) {
+            final BigDecimal lossPct = estimateUnrealizedLossPct(currentPrice);
+            final String lossInfo = lossPct.compareTo(BigDecimal.ZERO) > 0
+                    ? "\nEstimated loss: " + lossPct + "%"
+                    : "";
+            telegramService.sendMessage(message + lossInfo + "\nCurrent Nifty: " + currentPrice);
+            earlyWarningSent = true;
+            logger.info("Early warning sent for signal: {}", signal);
+        }
     }
 
     private BigDecimal computeDynamicPcrThreshold() {
@@ -900,9 +1061,16 @@ public class OiAnalysisService {
         if (entry.underlyingValue() == null || entry.underlyingValue().compareTo(BigDecimal.ZERO) == 0) {
             return true;
         }
-        final BigDecimal priceChangePct = latest.underlyingValue().subtract(entry.underlyingValue())
+        return isPriceConfirmed(latest.underlyingValue(), entry.underlyingValue());
+    }
+
+    private boolean isPriceConfirmed(final BigDecimal currentPrice, final BigDecimal entryPriceValue) {
+        if (entryPriceValue == null || entryPriceValue.compareTo(BigDecimal.ZERO) == 0) {
+            return true;
+        }
+        final BigDecimal priceChangePct = currentPrice.subtract(entryPriceValue)
                 .abs().multiply(BigDecimal.valueOf(100))
-                .divide(entry.underlyingValue(), 2, RoundingMode.HALF_UP);
+                .divide(entryPriceValue, 2, RoundingMode.HALF_UP);
         return priceChangePct.compareTo(PRICE_CONFIRMATION_PCT) >= 0;
     }
 
@@ -918,7 +1086,9 @@ public class OiAnalysisService {
                                           final BigDecimal dynamicThreshold,
                                           final boolean directionReversal,
                                           final boolean superTrendReversal,
-                                          final boolean oiSurge) {
+                                          final boolean oiSurge,
+                                          final BigDecimal currentPrice,
+                                          final OiDataSnapshot entry) {
         final BigDecimal baseConfidence = switch (signal) {
             case PCR_SHIFT -> {
                 final BigDecimal ratio = pcrShift.divide(dynamicThreshold, 2, RoundingMode.HALF_UP);
@@ -935,7 +1105,21 @@ public class OiAnalysisService {
         if (directionReversal) signalCount++;
         if (superTrendReversal) signalCount++;
         if (oiSurge) signalCount++;
-        final BigDecimal boost = BigDecimal.valueOf(signalCount > 1 ? 15 : 0);
+        BigDecimal boost = BigDecimal.valueOf(signalCount > 1 ? 15 : 0);
+
+        if (isPriceConfirmed(currentPrice, entry.underlyingValue())) {
+            boost = boost.add(BigDecimal.valueOf(10));
+        }
+
+        if (isPastAfternoonThreshold()) {
+            boost = boost.add(BigDecimal.valueOf(10));
+        }
+
+        final BigDecimal lossPct = estimateUnrealizedLossPct(currentPrice);
+        if (lossPct.compareTo(BigDecimal.valueOf(0.5)) > 0) {
+            boost = boost.add(BigDecimal.valueOf(10));
+        }
+
         return baseConfidence.add(boost).min(BigDecimal.valueOf(95));
     }
 

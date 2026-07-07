@@ -2,7 +2,7 @@
 
 ## Overview
 
-This strategy analyzes Nifty/BankNifty option chain data to determine intraday market direction based on Open Interest (OI) changes. It runs on a 6-minute cycle during market hours (9:30 AM - 3:30 PM IST, Mon-Fri), computes a 10 AM market prediction, and monitors positions for exit signals.
+This strategy analyzes Nifty option chain data to determine intraday market direction based on Open Interest (OI) changes. It runs on a 6-minute cycle during market hours (9:30 AM - 3:30 PM IST, Mon-Fri), computes a 10 AM market prediction, and monitors positions for exit signals with multiple loss-mitigation layers.
 
 ---
 
@@ -44,6 +44,7 @@ NSE Option Chain API
 6. Sort strikes by OI change (descending), keep top 5
 7. Store as a timestamped `OiDataSnapshot`
 8. Keep max 100 snapshots in memory
+9. When a position is active, update highest/lowest price watermarks for trailing stop
 
 ### Key Constants
 
@@ -101,20 +102,27 @@ Compare the first snapshot vs latest snapshot:
 
 ## Exit Strategy (`notifyExitIfNeeded`)
 
-The exit system is the most sophisticated component. It uses a multi-layered assessment pipeline.
+The exit system is a multi-layered assessment pipeline with three categories of protection:
+
+1. **Price-based stops** (defensive) — hard stop-loss, trailing stop-loss, loss cap
+2. **OI-based signals** (predictive) — PCR shift, direction reversal, SuperTrend reversal, OI surge
+3. **Confidence scoring** — confirmation streaks, time-based tightening, price confirmation boost
 
 ### Exit Signal Types (`ExitSignal` enum)
 
-| Signal | Description |
-|--------|-------------|
-| `NONE` | No exit warranted |
-| `PCR_SHIFT` | PCR has moved significantly since position entry |
-| `DIRECTION_REVERSAL` | Market direction inferred from OI has reversed |
-| `OI_SURGE` | Abnormal OI volume detected |
+| Signal | Category | Description |
+|--------|----------|-------------|
+| `NONE` | — | No exit warranted |
+| `HARD_STOP` | Price-based | 1% adverse move against position → exit immediately |
+| `TRAILING_STOP` | Price-based | 0.5% pullback from best price (when in profit) → exit immediately |
+| `PCR_SHIFT` | OI-based | PCR has moved significantly since position entry |
+| `DIRECTION_REVERSAL` | OI-based | Market direction inferred from OI has reversed |
+| `SUPERTREND_REVERSAL` | OI-based | 15-min SuperTrend flipped direction |
+| `OI_SURGE` | OI-based | Abnormal OI volume detected |
 
 ### Assessment Pipeline (`computeExitAssessment`)
 
-The pipeline runs in this order:
+The pipeline runs in this strict order — earlier checks take priority and bypass later checks:
 
 ```
 1. Guard Checks
@@ -122,41 +130,71 @@ The pipeline runs in this order:
    - At least 2 snapshots must exist
    - Entry snapshot must be available
 
-2. Cooldown Check
-   - If an exit was fired within the last 30 minutes, return NONE
+2. HARD STOP CHECK (Price-Based — skips cooldown)
+   - If entry direction is BULLISH and price dropped >= 1% from entry → HARD_STOP
+   - If entry direction is BEARISH and price rose >= 1% from entry → HARD_STOP
+   - Neutral direction: 1% move either way → HARD_STOP
+   - Fires immediately, no confirmation needed
 
-3. Signal Detection (priority order)
+3. TRAILING STOP CHECK (Price-Based — skips cooldown)
+   - If BULLISH and in profit: track highest price since entry
+     If price pulls back >= 0.5% from that peak → TRAILING_STOP
+   - If BEARISH and in profit: track lowest price since entry
+     If price rallies >= 0.5% from that trough → TRAILING_STOP
+   - Fires immediately, no confirmation needed
+
+4. LOSS CAP CHECK (Price-Based — skips cooldown)
+   - If estimated unrealized loss exceeds 2% → HARD_STOP
+   - Loss is estimated relative to entry price and direction
+   - Fires immediately, no confirmation needed
+
+5. Cooldown Check
+   - Only reached if none of the price-based stops triggered
+   - If an OI-based exit fired within the last 15 minutes, return NONE
+   - Hard stops do NOT set cooldown, allowing immediate re-entry
+
+6. Afternoon Threshold Tightening
+   - After 2:30 PM IST, the PCR threshold is halved (× 0.5)
+   - Accounts for accelerated theta decay and fading intraday trends
+
+7. Signal Detection (priority order)
    a. Dynamic PCR Shift → PCR_SHIFT
    b. Rolling Direction Reversal → DIRECTION_REVERSAL
-   c. OI Volume Surge → OI_SURGE
-   d. No signal → reset streak, return NONE
+   c. SuperTrend Reversal → SUPERTREND_REVERSAL
+   d. OI Volume Surge → OI_SURGE
+   e. No signal → reset streak, return NONE
 
-4. Confirmation Lag
-   - First detection: log, set streak=1, return NONE
+8. Strong Signal Fast-Track
+   - If PCR_SHIFT + DIRECTION_REVERSAL fire together → requires only 1 confirmation
+   - If PCR_SHIFT ratio > 2× threshold → requires only 1 confirmation
+   - Otherwise → requires 2 confirmations (standard)
+
+9. Confirmation Lag
+   - First detection: log, send EARLY WARNING via Telegram, set streak=1, return NONE
    - Consecutive same signal: increment streak
-   - If streak < 2: return NONE (waiting for confirmation)
-   - If streak >= 2: proceed (confirmed signal)
+   - If streak < required: return NONE (waiting for confirmation)
+   - If streak >= required: proceed (confirmed signal)
 
-5. Price Confirmation
-   - Check if underlying price has moved at least 0.5% from entry
-   - If not, suppress signal (return NONE)
+10. Confidence Computation
+    - PCR_SHIFT: 30% + (ratio × 40%), capped at 80%
+    - DIRECTION_REVERSAL: 70%
+    - SUPERTREND_REVERSAL: 65%
+    - OI_SURGE: 55%
+    - Boost: +15% if multiple signals, +10% if price confirmed, +10% after 2:30 PM, +10% if loss > 0.5%
+    - Overall cap: 95%
 
-6. Confidence Computation
-   - PCR_SHIFT: 30% + (ratio × 40%), capped at 80%
-   - DIRECTION_REVERSAL: 70%
-   - OI_SURGE: 55%
-   - Boost: +15% if multiple signals fire simultaneously
-   - Overall cap: 95%
+11. Exit Fraction (scaling)
+    - HARD_STOP / TRAILING_STOP: exit 100%
+    - PCR_SHIFT with ratio < 1.5×: exit 50% of position
+    - PCR_SHIFT with ratio >= 1.5×: exit 100%
+    - SUPERTREND_REVERSAL: exit 50%
+    - All other signals: exit 100%
 
-7. Exit Fraction (scaling)
-   - PCR_SHIFT with ratio < 1.5x: exit 50% of position
-   - PCR_SHIFT with ratio >= 1.5x: exit 100%
-   - All other signals: exit 100%
-
-8. Fire Exit
-   - Send Telegram alert via `buildExitReport`
-   - Record `lastExitFiredAt` for cooldown
-   - Reset confirmation state
+12. Fire Exit
+    - Send Telegram alert via `buildExitReport`
+    - For OI-based exits: record `lastExitFiredAt` for cooldown
+    - For price-based exits: skip cooldown (allows immediate re-entry)
+    - Reset confirmation state, early warning flag
 ```
 
 ### Enhanced Detection Methods
@@ -194,23 +232,82 @@ Apply the same >60% dominance rule on the aggregated values.
 
 If the total absolute OI change (|PE change| + |CE change|) in a single snapshot exceeds 50 contracts, flag as an OI surge — indicating aggressive positioning.
 
+#### SuperTrend Reversal (`checkSuperTrendReversal`)
+
+A 15-min SuperTrend (3 snapshots) using ATR-based bands. When the trend direction flips, it triggers `SUPERTREND_REVERSAL` — a 50% partial exit signal.
+
+#### Hard Stop-Loss (`isHardStopTriggered`)
+
+Exits the position immediately if the underlying moves 1% against the entry direction. This is the primary loss cap mechanism:
+
+- BULLISH entry: stop if price drops >= 1% below entry
+- BEARISH entry: stop if price rises >= 1% above entry
+- Skips cooldown, fires without confirmation
+
+#### Trailing Stop-Loss (`isTrailingStopTriggered`)
+
+Once the position is in profit, tracks the best price (highest for BULLISH, lowest for BEARISH). If the price pulls back 0.5% from that extreme, exits to lock in gains:
+
+- BULLISH: stop if current price < peak × (1 - 0.005)
+- BEARISH: stop if current price > trough × (1 + 0.005)
+- Only fires when in profit (current price better than entry)
+
+#### Loss Cap (`isLossCapExceeded`)
+
+If the estimated unrealized loss exceeds 2% of entry, triggers a hard exit. Estimated loss is calculated relative to direction:
+
+- BULLISH: loss % = (entry - current) / entry × 100
+- BEARISH: loss % = (current - entry) / entry × 100
+- If current price is favorable (profit), loss is 0%
+
+#### Early Warning (`sendEarlyWarning`)
+
+On the first detection of any OI-based signal (before confirmation), sends a Telegram alert:
+
+> ⚠️ EARLY WARNING: PCR shift detected (pending confirmation). Monitor closely.
+> Estimated loss: 0.8%
+> Current Nifty: 24150
+
+Only sent once per entry (tracked via `earlyWarningSent` flag).
+
+#### Afternoon Tightening
+
+After 2:30 PM IST, all PCR thresholds are tightened by 50% (`AFTERNOON_THRESHOLD_MULTIPLIER = 0.5`) to account for:
+- Accelerated theta decay in options
+- Weakening intraday trends
+- Reduced time for trade recovery
+
 #### Price Confirmation (`isPriceConfirmed`)
 
-Require the underlying price to have moved at least 0.5% from the entry price before honoring any exit signal. Prevents exits on OI changes that lack price follow-through.
+Changed from a gate (blocking exits) to a confidence booster (+10). The 0.5% price-move requirement is still computed but no longer suppresses signals — it only adds confidence.
 
 #### Cooldown (`isInCooldown`)
 
-After any exit signal fires, suppress all further exit signals for 30 minutes to prevent alert fatigue and allow reassessment.
+- Reduced from 30 to 15 minutes
+- Only applies to OI-based exits (PCR shift, direction reversal, SuperTrend, OI surge)
+- Hard stops and trailing stops skip cooldown entirely
 
 ### Position Lifecycle
 
 | Method | Effect |
 |--------|--------|
-| `markPositionEntered()` | Sets `positionEntered=true`, records entry snapshot, entry price, and computed entry direction |
-| `markPositionExited()` | Clears `positionEntered`, clears entry snapshot |
-| `reset()` | Full state reset (daily) |
+| `markPositionEntered()` | Sets `positionEntered=true`, records entry snapshot, entry price, computed entry direction, initializes price watermarks (`highestPriceSinceEntry` / `lowestPriceSinceEntry`), resets `earlyWarningSent` |
+| `markPositionExited()` | Clears `positionEntered`, clears entry snapshot, resets watermarks and early warning flag |
+| `reset()` | Full state reset including watermarks and early warning flag (daily) |
 
 ### Exit Alert Format
+
+```
+⚠️ EXIT SIGNAL DETECTED ⚠️
+
+HARD STOP-LOSS triggered. Price moved beyond stop-loss threshold. EXIT IMMEDIATELY.
+Confidence: 95%
+
+Current PCR: 1.15
+Current Nifty: 23900.00
+```
+
+Or for OI-based exits with new recommendation:
 
 ```
 ⚠️ EXIT SIGNAL DETECTED ⚠️
@@ -243,38 +340,45 @@ OI updates are sent only when significant changes are detected:
 
 ### Entry/Prediction Constants
 
-| Parameter | File Location | Value |
-|-----------|---------------|-------|
-| `PREDICTION_TIME` | `OiAnalysisService.java:37` | 10:00 AM IST |
-| `PCR_BULLISH_THRESHOLD` | `OiAnalysisService.java:38` | 1.2 |
-| `PCR_BEARISH_THRESHOLD` | `OiAnalysisService.java:39` | 0.8 |
-| `TOP_STRIKES_COUNT` | `OiAnalysisService.java:41` | 5 |
-| `STRIKE_INTERVAL` | `OiAnalysisService.java:43` | 50 |
+| Parameter | Value | Purpose |
+|-----------|-------|---------|
+| `PREDICTION_TIME` | 10:00 AM IST | Time for daily prediction |
+| `PCR_BULLISH_THRESHOLD` | 1.2 | PCR above this is bullish |
+| `PCR_BEARISH_THRESHOLD` | 0.8 | PCR below this is bearish |
+| `TOP_STRIKES_COUNT` | 5 | Top OI buildup strikes to track |
+| `STRIKE_INTERVAL` | 50 | Nifty strike spacing |
 
 ### Exit Strategy Constants
 
-| Parameter | File Location | Value | Purpose |
-|-----------|---------------|-------|---------|
-| `EXIT_PCR_SHIFT` | `OiAnalysisService.java:44` | 0.3 | Floor for PCR shift threshold |
-| `EXIT_OI_SURGE` | `OiAnalysisService.java:45` | 50 | OI surge trigger (contracts) |
-| `CONFIRMATION_CONSECUTIVE` | `OiAnalysisService.java:50` | 2 | Consecutive checks needed |
-| `PCR_VOLATILITY_WINDOW` | `OiAnalysisService.java:51` | 8 | Snapshot window for avg ΔPCR |
-| `PCR_VOLATILITY_MULTIPLIER` | `OiAnalysisService.java:52` | 2.0 | Multiplier for dynamic threshold |
-| `DIRECTION_ROLLING_WINDOW` | `OiAnalysisService.java:53` | 3 | Snapshots for rolling direction |
-| `EXIT_COOLDOWN_MINUTES` | `OiAnalysisService.java:54` | 30 | Cooldown after exit fires |
-| `EXIT_CONFIDENCE_THRESHOLD` | `OiAnalysisService.java:55` | 50 | Minimum confidence % to fire |
-| `PRICE_CONFIRMATION_PCT` | `OiAnalysisService.java:56` | 0.5 | Min price move to confirm |
-| `DAYS_TO_EXPIRY_DAMPENING` | `OiAnalysisService.java:57` | 2 | Expiry proximity threshold |
-| `TIME_DECAY_FACTOR` | `OiAnalysisService.java:58` | 1.5 | PCR threshold multiplier near expiry |
+| Parameter | Value | Purpose |
+|-----------|-------|---------|
+| `EXIT_PCR_SHIFT` | 0.3 | Floor for PCR shift threshold |
+| `EXIT_OI_SURGE` | 50 | OI surge trigger (contracts) |
+| `CONFIRMATION_CONSECUTIVE` | 2 | Standard consecutive checks needed |
+| `STRONG_SIGNAL_CONFIRMATION_REQUIRED` | 1 | Fast-track when multiple signals combine |
+| `PCR_VOLATILITY_WINDOW` | 8 | Snapshot window for avg ΔPCR |
+| `PCR_VOLATILITY_MULTIPLIER` | 2.0 | Multiplier for dynamic threshold |
+| `DIRECTION_ROLLING_WINDOW` | 3 | Snapshots for rolling direction |
+| `SUPERTREND_PERIOD` | 3 | Snapshots for SuperTrend (15 min) |
+| `SUPERTREND_MULTIPLIER` | 3.0 | ATR multiplier for SuperTrend bands |
+| `EXIT_COOLDOWN_MINUTES` | 15 | Cooldown after OI-based exit (reduced from 30) |
+| `EXIT_CONFIDENCE_THRESHOLD` | 50 | Minimum confidence % to fire |
+| `PRICE_CONFIRMATION_PCT` | 0.5 | Min price move (now confidence booster, not gate) |
+| `DAYS_TO_EXPIRY_DAMPENING` | 2 | Expiry proximity threshold |
+| `TIME_DECAY_FACTOR` | 1.5 | PCR threshold multiplier near expiry |
+| `HARD_STOP_LOSS_PCT` | 1.0 | Hard stop-loss % from entry |
+| `TRAILING_STOP_PCT` | 0.5 | Trailing stop pullback % from peak |
+| `LOSS_CAP_PCT` | 2.0 | Maximum acceptable loss % |
+| `AFTERNOON_THRESHOLD_MULTIPLIER` | 0.5 | PCR threshold tightener after 2:30 PM |
 
 ### Scheduler Constants
 
-| Parameter | File Location | Value |
-|-----------|---------------|-------|
-| `MARKET_START` | `IntradayOiScheduler.java:21` | 9:30 AM IST |
-| `PREDICTION_TIME` | `IntradayOiScheduler.java:22` | 10:00 AM IST |
-| `MARKET_CLOSE` | `IntradayOiScheduler.java:23` | 3:30 PM IST |
-| `SIX_MINUTES_MS` | `IntradayOiScheduler.java:24` | 360,000 ms |
+| Parameter | Value |
+|-----------|-------|
+| `MARKET_START` | 9:30 AM IST |
+| `PREDICTION_TIME` | 10:00 AM IST |
+| `MARKET_CLOSE` | 3:30 PM IST |
+| `SIX_MINUTES_MS` | 360,000 ms |
 
 ---
 
@@ -314,7 +418,8 @@ tradeRecommendation: String
 
 ### `ExitSignal` (enum)
 ```
-NONE, PCR_SHIFT, DIRECTION_REVERSAL, OI_SURGE
+NONE, PCR_SHIFT, DIRECTION_REVERSAL, SUPERTREND_REVERSAL, OI_SURGE,
+HARD_STOP, TRAILING_STOP
 ```
 
 ### `ExitAssessment` (record, nested in `OiAnalysisService`)
@@ -335,11 +440,14 @@ exitFraction: BigDecimal  (0.0-1.0, e.g., 0.5 = exit 50%)
 
 ### Exit flow:
 1. Scheduler calls `notifyExitIfNeeded()` every 6 minutes
-2. If a confirmed exit signal is detected, a Telegram alert is sent
-3. User manually exits the position and calls `markPositionExited()`
+2. Price-based stops (hard stop, trailing stop, loss cap) are checked first — fire immediately
+3. OI-based signals go through confirmation lag and cooldown
+4. If a confirmed exit signal is detected, a Telegram alert is sent
+5. User manually exits the position and calls `markPositionExited()`
 
 ### Monitoring:
 - OI updates are sent automatically on significant changes
+- Early warning alerts sent on first OI signal detection (before confirmation)
 - Exit alerts include current market data and a fresh recommendation
 - Market close summary is sent at 4 PM
 
@@ -353,13 +461,24 @@ exitFraction: BigDecimal  (0.0-1.0, e.g., 0.5 = exit 50%)
 - No OI surge detection
 - No confirmation/cooldown/weighting
 
-### Enhanced Exit Strategy (current)
+### Enhanced Exit Strategy (previous)
 - Dynamic PCR threshold based on recent volatility
 - Time-decay dampening near expiry
 - Rolling window direction computation
 - OI surge detection (EXIT_OI_SURGE)
-- Price confirmation (0.5% minimum move)
+- Price confirmation gate (0.5% minimum move)
 - 30-minute cooldown after exit
 - Signal weighting with confidence scores
 - Trailing/scaling exit (50% or 100% based on severity)
 - Confirmation lag (2 consecutive checks required)
+
+### Loss Minimization Improvements (current)
+- **Hard stop-loss (1%)**: Price-based, checked before OI signals, skips cooldown
+- **Trailing stop-loss (0.5%)**: Locks in profits, only fires when in profit
+- **Loss cap (2%)**: Maximum acceptable drawdown before forced exit
+- **Price confirmation → confidence booster**: No longer blocks exits, adds +10 confidence
+- **Early warning alerts**: Telegram on first OI signal detection (pre-confirmation)
+- **Strong signal fast-track**: Combined signals skip to 1 confirmation
+- **SuperTrend reversal**: New exit signal type (50% partial exit)
+- **Afternoon tightening**: PCR thresholds halved after 2:30 PM
+- **Cooldown reduced**: 30 → 15 minutes, skipped entirely for price-based stops

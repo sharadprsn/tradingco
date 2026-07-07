@@ -37,7 +37,6 @@ public class StartupHealthCheck {
         logger.info("========================================");
 
         checkNseConnectivity();
-        checkTelegramConnectivity();
 
         logger.info("========================================");
         logger.info("  STARTUP HEALTH CHECKS COMPLETE");
@@ -70,19 +69,6 @@ public class StartupHealthCheck {
             }
         } catch (final Exception e) {
             logger.error("[NSE] Connection FAILED - {}", e.getMessage());
-        }
-    }
-
-    private void checkTelegramConnectivity() {
-        logger.info("[TELEGRAM] Checking connectivity...");
-        try {
-            final String message = String.format(
-                    "\u2705 Kite Trading started successfully\nTime: %s",
-                    LocalDateTime.now(IST).format(DateTimeFormatter.ofPattern("hh:mm a")));
-            telegramService.sendMessage(message);
-            logger.info("[TELEGRAM] Connection OK - startup notification sent");
-        } catch (final Exception e) {
-            logger.error("[TELEGRAM] Connection FAILED - {}", e.getMessage());
         }
     }
 
