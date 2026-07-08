@@ -19,14 +19,18 @@ public class IntradayOiScheduler {
     private static final Logger logger = LoggerFactory.getLogger(IntradayOiScheduler.class);
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
     private static final LocalTime MARKET_START = LocalTime.of(9, 30);
-    private static final LocalTime PREDICTION_TIME = LocalTime.of(9, 45);
+    private static final LocalTime PREDICTION_TIME_945 = LocalTime.of(9, 45);
+    private static final LocalTime PREDICTION_TIME_12 = LocalTime.of(12, 0);
+    private static final LocalTime PREDICTION_TIME_14 = LocalTime.of(14, 0);
     private static final LocalTime MARKET_CLOSE = LocalTime.of(15, 30);
     private static final int SIX_MINUTES_MS = 360_000;
 
     private final OiAnalysisService oiAnalysisService;
     private final TelegramService telegramService;
 
-    private volatile boolean predictionExecutedToday;
+    private volatile boolean prediction945Executed;
+    private volatile boolean prediction12Executed;
+    private volatile boolean prediction14Executed;
 
     public IntradayOiScheduler(final OiAnalysisService oiAnalysisService,
                                final TelegramService telegramService) {
@@ -46,11 +50,25 @@ public class IntradayOiScheduler {
         try {
             oiAnalysisService.fetchAndRecordOi();
 
-            final boolean isPastPredictionTime = !now.isBefore(PREDICTION_TIME);
-            if (isPastPredictionTime && !predictionExecutedToday) {
+            final boolean isPast945 = !now.isBefore(PREDICTION_TIME_945);
+            if (isPast945 && !prediction945Executed) {
                 oiAnalysisService.notifyPrediction();
-                predictionExecutedToday = true;
+                prediction945Executed = true;
                 logger.info("9:45 AM prediction executed and sent via Telegram");
+            }
+
+            final boolean isPast12 = !now.isBefore(PREDICTION_TIME_12);
+            if (isPast12 && !prediction12Executed && prediction945Executed) {
+                oiAnalysisService.reprocessPrediction("12:00 PM");
+                prediction12Executed = true;
+                logger.info("12:00 PM reprocessed prediction sent");
+            }
+
+            final boolean isPast14 = !now.isBefore(PREDICTION_TIME_14);
+            if (isPast14 && !prediction14Executed && prediction12Executed) {
+                oiAnalysisService.reprocessPrediction("2:00 PM");
+                prediction14Executed = true;
+                logger.info("2:00 PM reprocessed prediction sent");
             }
 
             if (oiAnalysisService.isPositionEntered()) {
@@ -67,7 +85,9 @@ public class IntradayOiScheduler {
     public void resetDaily() {
         logger.info("Resetting OI scheduler state for new trading day");
         oiAnalysisService.reset();
-        predictionExecutedToday = false;
+        prediction945Executed = false;
+        prediction12Executed = false;
+        prediction14Executed = false;
         final String baseUrl = System.getenv().getOrDefault("APP_BASE_URL", "https://localhost:443");
         final String loginEndpoint = baseUrl.replaceAll("/+$", "") + "/api/v1/auth/login-url";
         final String message = "\uD83D\uDD11 Authenticate with Kite to start trading:\n" + loginEndpoint;
@@ -92,7 +112,9 @@ public class IntradayOiScheduler {
             telegramService.sendMessage(summary.toString());
         }
         oiAnalysisService.reset();
-        predictionExecutedToday = false;
+        prediction945Executed = false;
+        prediction12Executed = false;
+        prediction14Executed = false;
     }
 
     boolean shouldRun() {
