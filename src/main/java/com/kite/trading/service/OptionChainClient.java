@@ -4,9 +4,9 @@ import com.kite.trading.dto.IndexQuote;
 import com.kite.trading.dto.OptionChainData;
 
 public interface OptionChainClient {
-    OptionChainData fetchOptionChain();
+  OptionChainData fetchOptionChain();
 
-    default IndexQuote fetchIndexQuote() {
-        return null;
-    }
+  default IndexQuote fetchIndexQuote() {
+    return null;
+  }
 }

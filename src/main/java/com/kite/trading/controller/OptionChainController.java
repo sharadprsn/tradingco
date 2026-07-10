@@ -13,22 +13,22 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api/v1/option-chain")
 public class OptionChainController {
 
-    private static final Logger logger = LoggerFactory.getLogger(OptionChainController.class);
+  private static final Logger logger = LoggerFactory.getLogger(OptionChainController.class);
 
-    private final OptionChainClient optionChainClient;
+  private final OptionChainClient optionChainClient;
 
-    public OptionChainController(final OptionChainClient optionChainClient) {
-        this.optionChainClient = optionChainClient;
+  public OptionChainController(final OptionChainClient optionChainClient) {
+    this.optionChainClient = optionChainClient;
+  }
+
+  @GetMapping
+  public ResponseEntity<OptionChainData> getOptionChain() {
+    logger.info("Fetching option chain data");
+    final OptionChainData data = optionChainClient.fetchOptionChain();
+    if (data == null) {
+      logger.warn("Option chain data unavailable from all sources");
+      return ResponseEntity.noContent().build();
     }
-
-    @GetMapping
-    public ResponseEntity<OptionChainData> getOptionChain() {
-        logger.info("Fetching option chain data");
-        final OptionChainData data = optionChainClient.fetchOptionChain();
-        if (data == null) {
-            logger.warn("Option chain data unavailable from all sources");
-            return ResponseEntity.noContent().build();
-        }
-        return ResponseEntity.ok(data);
-    }
+    return ResponseEntity.ok(data);
+  }
 }

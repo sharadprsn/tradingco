@@ -5,8 +5,9 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 
 /**
  * Wrapper for the Kite Connect {@code /session/token} API response.
- * 
- * The session endpoint returns data inside a standard Kite API envelope:
+ *
+ * <p>The session endpoint returns data inside a standard Kite API envelope:
+ *
  * <pre>{@code
  * {
  *   "status": "success",
@@ -21,16 +22,10 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  *   }
  * }
  * }</pre>
- * 
+ *
  * @author Kite Trading Team
  * @version 1.0.0
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public record SessionResponse(
-        @JsonProperty("status")
-        String status,
-
-        @JsonProperty("data")
-        KiteSession data
-) {
-}
+    @JsonProperty("status") String status, @JsonProperty("data") KiteSession data) {}

@@ -1,7 +1,6 @@
 package com.kite.trading.dto;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
-
 import java.math.BigDecimal;
 import java.util.List;
 
@@ -12,22 +11,10 @@ public record OiAnalysisResult(
     @JsonProperty("suggestedStrategy") String suggestedStrategy,
     @JsonProperty("suggestedStrikes") List<BigDecimal> suggestedStrikes,
     @JsonProperty("reasoning") String reasoning,
-    @JsonProperty("tradeRecommendation") String tradeRecommendation
-) {
-    public OiAnalysisResult {
-        if (tradeRecommendation == null) {
-            tradeRecommendation = "";
-        }
+    @JsonProperty("tradeRecommendation") String tradeRecommendation) {
+  public OiAnalysisResult {
+    if (tradeRecommendation == null) {
+      tradeRecommendation = "";
     }
-
-    public OiAnalysisResult(
-        final String direction,
-        final BigDecimal confidence,
-        final BigDecimal pcr,
-        final String suggestedStrategy,
-        final List<BigDecimal> suggestedStrikes,
-        final String reasoning
-    ) {
-        this(direction, confidence, pcr, suggestedStrategy, suggestedStrikes, reasoning, "");
-    }
+  }
 }

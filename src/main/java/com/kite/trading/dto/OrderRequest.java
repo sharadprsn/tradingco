@@ -16,10 +16,9 @@ public record OrderRequest(
     @JsonProperty("validity") String validity,
     @JsonProperty("stoploss") BigDecimal stoploss,
     @JsonProperty("squareoff") BigDecimal squareoff,
-    @JsonProperty("trailing_stoploss") Integer trailingStoploss
-) {
-    public OrderRequest {
-        if (validity == null) validity = "DAY";
-        if (product == null) product = "MIS";
-    }
+    @JsonProperty("trailing_stoploss") Integer trailingStoploss) {
+  public OrderRequest {
+    if (validity == null) validity = "DAY";
+    if (product == null) product = "MIS";
+  }
 }
