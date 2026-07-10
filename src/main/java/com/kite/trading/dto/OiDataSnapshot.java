@@ -15,11 +15,17 @@ public record OiDataSnapshot(
     @JsonProperty("pcr") BigDecimal pcr,
     @JsonProperty("topOiBuildUp") List<OiStrikeInfo> topOiBuildUp,
     @JsonProperty("largestPeOiStrike") BigDecimal largestPeOiStrike,
-    @JsonProperty("largestCeOiStrike") BigDecimal largestCeOiStrike) {
+    @JsonProperty("largestCeOiStrike") BigDecimal largestCeOiStrike,
+    @JsonProperty("strikePremiums") List<StrikePremium> strikePremiums) {
   public record OiStrikeInfo(
       @JsonProperty("strikePrice") BigDecimal strikePrice,
       @JsonProperty("optionType") String optionType,
       @JsonProperty("openInterest") BigDecimal openInterest,
       @JsonProperty("changeInOi") BigDecimal changeInOi,
       @JsonProperty("pchangeInOi") BigDecimal pchangeInOi) {}
+
+  public record StrikePremium(
+      @JsonProperty("strikePrice") BigDecimal strikePrice,
+      @JsonProperty("pePremium") BigDecimal pePremium,
+      @JsonProperty("cePremium") BigDecimal cePremium) {}
 }

@@ -2,7 +2,16 @@
 
 ## Overview
 
-This strategy analyzes Nifty option chain data to determine intraday market direction based on Open Interest (OI) changes. It runs on a 6-minute cycle during market hours (9:30 AM - 3:30 PM IST, Mon-Fri), computes a 10 AM market prediction, and monitors positions for exit signals with multiple loss-mitigation layers.
+This strategy analyzes Nifty & Sensex option chain data to determine intraday market direction based on Open Interest (OI) changes. It runs on a 6-minute cycle during market hours (9:30 AM - 3:30 PM IST, Mon-Fri), computes a 10 AM market prediction, and monitors positions for exit signals with multiple loss-mitigation layers.
+
+### Index Routing
+
+| Day | Index | Strike Interval | Lot Size |
+|-----|-------|-----------------|----------|
+| Mon, Tue, Fri | NIFTY | 50 | 50 |
+| Wed, Thu | SENSEX | 100 | 10 |
+
+The index is resolved automatically via `resolveIndexForDay()` using `LocalDate.now().getDayOfWeek()`.
 
 ---
 
@@ -50,11 +59,14 @@ NSE Option Chain API
 
 | Constant | Value | Purpose |
 |----------|-------|---------|
-| `STRIKE_INTERVAL` | 50 | Nifty strike spacing |
+| `STRIKE_INTERVAL_NIFTY` | 50 | Nifty strike spacing |
+| `STRIKE_INTERVAL_SENSEX` | 100 | Sensex strike spacing |
 | `NEAR_STRIKE_RANGE` | 5 | Number of strikes above/below ATM to include |
 | `TOP_STRIKES_COUNT` | 5 | Number of top OI buildup strikes to track |
 | `PCR_BULLISH_THRESHOLD` | 1.2 | PCR above this is considered bullish |
 | `PCR_BEARISH_THRESHOLD` | 0.8 | PCR below this is considered bearish |
+| `LOT_SIZE_NIFTY` | 50 | Nifty lot size |
+| `LOT_SIZE_SENSEX` | 10 | Sensex lot size |
 | `OI_CHANGE_SIGNIFICANCE` | 20 | Minimum OI change considered significant |
 
 ---
@@ -76,27 +88,49 @@ Compare the first snapshot vs latest snapshot:
 - BULLISH/BEARISH: The dominant percentage (capped at 90%)
 - NEUTRAL: 50%
 
+### VIX & Day Range
+
+- VIX is fetched from NSE (`/api/quote-indices?indices=INDIA%20VIX`) using the existing `fetchIndexQuote("VIX")` method
+- Day Range is computed as: `open ± (open × vix / 1600)` — the expected daily price range based on implied volatility
+
 ### Strategy Mapping
 
 | Direction | Strategy |
 |-----------|----------|
 | BULLISH | PUT CREDIT SPREAD |
 | BEARISH | CALL CREDIT SPREAD |
-| NEUTRAL | IRON CONDOR |
+| NEUTRAL | SHORT STRANGLE |
 
 ### Strike Selection
 
-- **BULLISH**: Sell the first PE strike below ATM with top OI buildup (or ATM - 100), hedge 50 points below
-- **BEARISH**: Sell the first CE strike above ATM with top OI buildup (or ATM + 100), hedge 50 points above
-- **NEUTRAL**: Sell both sides' strongest OI buildup strikes, hedge outside
+Strikes are selected based on **premium (last price)** rather than fixed OTM offsets:
+
+- **BULLISH**: Find OTM PE strike with premium ₹30-40 (sell), find lower PE strike with premium ~₹10 (buy hedge)
+- **BEARISH**: Find OTM CE strike with premium ₹30-40 (sell), find higher CE strike with premium ~₹10 (buy hedge)
+- **NEUTRAL**: Find OTM PE and CE strikes with premium ₹30-40
+
+The `findStrikeByPremium()` method scans the live `strikePremiums` list (stored in each `OiDataSnapshot`) and picks the strike closest to the mid-point of the target premium range.
+
+### Position Sizing
+
+| Parameter | Value |
+|-----------|-------|
+| `DEPLOYED_CAPITAL` | ₹10,00,000 |
+| Target | 0.6% = ₹6,000 |
+| Stop Loss | 1% = ₹10,000 |
+| Premium target (Nifty) | ₹120/unit (lot 50) = ₹6,000 |
+| SL points (Nifty) | 200 pts = ₹10,000 |
 
 ### Trade Recommendation Format
 
-| Direction | Format |
-|-----------|--------|
-| BULLISH | `SELL {strike} PE (nearExpiry) \| HEDGE: BUY {hedge} PE (farExpiry)` |
-| BEARISH | `SELL {strike} CE (nearExpiry) \| HEDGE: BUY {hedge} CE (farExpiry)` |
-| NEUTRAL | `SELL {putStrike} PE & {callStrike} CE (nearExpiry) \| HEDGE: BUY {putHedge} PE & {callHedge} CE (farExpiry)` |
+```
+SELL {strike} PE (expiry)
+BUY {hedge} PE (expiry) [Hedge] | Spread: {width} pts
+Capital: ₹1000000 | Target: ₹6000 (0.6%) | SL: ₹10000 (1%)
+Lot: 50 | Premium target: ₹120/unit | SL: 200 pts
+OI Reasoning: Max PE OI at 25000. Max CE OI at 25500. PCR: 1.45 | Confidence: 83%
+Day range: ±219 pts
+```
 
 ---
 
@@ -394,6 +428,9 @@ totalPeOiChange: BigDecimal
 totalCeOiChange: BigDecimal
 pcr: BigDecimal
 topOiBuildUp: List<OiStrikeInfo>
+largestPeOiStrike: BigDecimal
+largestCeOiStrike: BigDecimal
+strikePremiums: List<StrikePremium>
 ```
 
 ### `OiStrikeInfo` (record, nested in `OiDataSnapshot`)
@@ -405,6 +442,13 @@ changeInOi: BigDecimal
 pchangeInOi: BigDecimal
 ```
 
+### `StrikePremium` (record, nested in `OiDataSnapshot`)
+```
+strikePrice: BigDecimal
+pePremium: BigDecimal
+cePremium: BigDecimal
+```
+
 ### `OiAnalysisResult` (record)
 ```
 direction: String ("BULLISH" | "BEARISH" | "NEUTRAL")
@@ -414,6 +458,10 @@ suggestedStrategy: String
 suggestedStrikes: List<BigDecimal>
 reasoning: String
 tradeRecommendation: String
+vix: BigDecimal
+indexOpen: BigDecimal
+largestPeOiStrike: BigDecimal
+largestCeOiStrike: BigDecimal
 ```
 
 ### `ExitSignal` (enum)
@@ -472,7 +520,7 @@ exitFraction: BigDecimal  (0.0-1.0, e.g., 0.5 = exit 50%)
 - Trailing/scaling exit (50% or 100% based on severity)
 - Confirmation lag (2 consecutive checks required)
 
-### Loss Minimization Improvements (current)
+### Loss Minimization Improvements
 - **Hard stop-loss (1%)**: Price-based, checked before OI signals, skips cooldown
 - **Trailing stop-loss (0.5%)**: Locks in profits, only fires when in profit
 - **Loss cap (2%)**: Maximum acceptable drawdown before forced exit
@@ -482,3 +530,12 @@ exitFraction: BigDecimal  (0.0-1.0, e.g., 0.5 = exit 50%)
 - **SuperTrend reversal**: New exit signal type (50% partial exit)
 - **Afternoon tightening**: PCR thresholds halved after 2:30 PM
 - **Cooldown reduced**: 30 → 15 minutes, skipped entirely for price-based stops
+
+### Dual Index & Premium-Based Strike Selection (latest)
+- **Day-of-week routing**: Mon/Tue/Fri → Nifty (50-pt strikes), Wed/Thu → Sensex (100-pt strikes)
+- **Premium-based strikes**: Sell at ₹30-40 premium, hedge at ~₹10 (credit spreads)
+- **VIX integration**: Fetched from NSE, displayed with day range (open ± open × vix / 1600)
+- **Largest OI strikes**: Max PE/CE OI levels shown in prediction
+- **Position sizing**: ₹10L capital, 0.6% target (₹6K), 1% SL (₹10K), lot-size aware
+- **StrikePremium data**: Per-strike PE/CE premiums stored in snapshots for live selection
+- **Build configuration cache**: Enabled for faster rebuilds

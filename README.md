@@ -1,13 +1,18 @@
-# Kite Trading — OI-Based Nifty Intraday Monitor
+# Kite Trading — OI-Based Intraday Monitor (Nifty & Sensex)
 
-A Spring Boot application that monitors NSE Nifty option chain data in real time, computes Put-Call Ratio (PCR) and Open Interest (OI) buildup, predicts intraday direction at 10 AM, and sends trade recommendations via Telegram.
+A Spring Boot application that monitors NSE Nifty/Sensex option chain data in real time, computes Put-Call Ratio (PCR) and Open Interest (OI) buildup, predicts intraday direction at 10 AM, and sends trade recommendations with position sizing via Telegram.
 
 ## Features
 
-- **OI Analysis** — Fetches NSE option chain every 6 minutes, filters ATM ± 5 strikes
+- **Dual Index Routing** — Mon/Tue/Fri → Nifty, Wed/Thu → Sensex (auto-detected)
+- **OI Analysis** — Fetches NSE option chain every 6 minutes, filters near ATM strikes
 - **Direction Prediction** — Bullish/Bearish/Neutral based on PE vs CE OI change dominance (60% threshold)
-- **Trade Recommendations** — Suggests sell strike, expiry, and hedge leg (calendar/diagonal spread)
-- **Exit Signals** — Monitors PCR shift (> 0.3) and direction reversal since entry
+- **Premium-Based Strike Selection** — Sell strikes with ₹30-40 premium, hedge at ~₹10 (credit spreads)
+- **Position Sizing** — Based on ₹10L capital, 0.6% target (₹6K), 1% SL (₹10K)
+- **VIX & Day Range** — VIX displayed, day range = open ± (open × vix / 1600)
+- **Largest OI Strikes** — Max PE/CE OI strikes shown in prediction
+- **Trade Recommendations** — Suggests sell strike, hedge leg, spread width, premium target
+- **Exit Signals** — Multi-layer: hard stop, trailing stop, loss cap, PCR shift, direction reversal, OI surge
 - **Telegram Notifications** — 10 AM prediction, periodic OI updates (threshold-gated), exit alerts
 - **Startup Health Check** — Verifies NSE connectivity and Telegram bot on startup
 - **Scheduler** — Weekday only (9:30 AM–3:30 PM), 6-minute interval, auto-reset daily
@@ -94,10 +99,10 @@ NSE API ──► NseOptionChainClient ──► OiAnalysisService ──► Tel
 | Trigger | Content |
 |---------|---------|
 | **Startup** | Application initialized — NSE & Telegram OK |
-| **10 AM Prediction** | Direction, confidence %, PCR, strategy, strikes, trade recommendation with expiries |
+| **10 AM Prediction** | Direction, confidence %, PCR, VIX, day range, largest PE/CE OI, open, strategy, strikes, trade recommendation with position sizing & OI reasoning |
 | **OI Update** (6 min) | Current PCR, PE/CE OI + change, top buildup strikes (skipped if change < thresholds) |
-| **Exit Signal** | Reason (PCR shift / direction reversal), current PCR/Nifty, **fresh recommendation** |
-| **Market Close** | Summary of the day's OI data |
+| **Exit Signal** | Reason (PCR shift / direction reversal / strike breach / profit target), current PCR/index, **fresh recommendation** |
+| **Market Close** | Summary of the day's index data |
 
 ### Thresholds (noise reduction)
 
@@ -183,13 +188,14 @@ docker run -d --name kite-trading -p 443:443 --env-file .env sharadprsn/kite-tra
 
 > **Note**: Replace `your-registry` with your actual Docker registry (e.g., `docker.io/username`, `ghcr.io/username`, or a private registry). Login first with `docker login` if required.
 
-### Tests (33 tests)
+### Tests (36 tests)
 
 | Test file | Tests | Covers |
 |-----------|-------|--------|
-| `OiAnalysisServiceTest` | 17 | PCR, ATM filter, direction prediction, thresholds, position lifecycle, reset |
-| `IntradayOiSchedulerTest` | 7 | shouldRun guard, reset, close summary, login URL, error handling |
+| `OiAnalysisServiceTest` | 23 | PCR, ATM filter, direction prediction, thresholds, position lifecycle, reset, day-of-week routing, strike premiums |
+| `IntradayOiSchedulerTest` | 5 | shouldRun guard, reset, close summary, error handling |
 | `StartupHealthCheckTest` | 4 | NSE/Telegram success and failure paths |
+| `NseConnectivityTest` | 3 | NSE config URLs, option chain data validation |
 | `KiteTradingApplicationTests` | 1 | Context load |
 
 ## Project Conventions
@@ -206,9 +212,15 @@ docker run -d --name kite-trading -p 443:443 --env-file .env sharadprsn/kite-tra
 |----------|-------|---------|
 | `PCR_BULLISH_THRESHOLD` | 1.2 | PCR above this is bullish |
 | `PCR_BEARISH_THRESHOLD` | 0.8 | PCR below this is bearish |
+| `STRIKE_INTERVAL_NIFTY` | 50 | Nifty strike spacing |
+| `STRIKE_INTERVAL_SENSEX` | 100 | Sensex strike spacing |
+| `LOT_SIZE_NIFTY` | 50 | Nifty lot size |
+| `LOT_SIZE_SENSEX` | 10 | Sensex lot size |
+| `DEPLOYED_CAPITAL` | ₹10,00,000 | Position sizing base |
+| `TARGET_PCT` | 0.6% | Intraday profit target |
+| `STOP_LOSS_PCT` | 1.0% | Max loss per trade |
 | `EXIT_PCR_SHIFT` | 0.3 | PCR shift from entry triggers exit |
 | `MIN_PCR_CHANGE_FOR_NOTIFICATION` | 0.05 | Min PCR change to send Telegram update |
 | `MIN_OI_CHANGE_FRACTION` | 0.05 | Min OI change fraction (5%) |
-| `NEAR_STRIKE_RANGE` | 5 | ATM ± 5 strikes (11 strikes total) |
-| `STRIKE_INTERVAL` | 50 | Nifty strike interval (50 points) |
+| `NEAR_STRIKE_RANGE` | 5 | ATM ± 5 strikes |
 | `TOP_STRIKES_COUNT` | 5 | Top OI buildup strikes to track |
