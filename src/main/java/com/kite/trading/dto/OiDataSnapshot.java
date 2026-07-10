@@ -27,5 +27,11 @@ public record OiDataSnapshot(
   public record StrikePremium(
       @JsonProperty("strikePrice") BigDecimal strikePrice,
       @JsonProperty("pePremium") BigDecimal pePremium,
-      @JsonProperty("cePremium") BigDecimal cePremium) {}
+      @JsonProperty("cePremium") BigDecimal cePremium,
+      @JsonProperty("peIv") BigDecimal peIv,
+      @JsonProperty("ceIv") BigDecimal ceIv) {
+    public StrikePremium(BigDecimal strikePrice, BigDecimal pePremium, BigDecimal cePremium) {
+      this(strikePrice, pePremium, cePremium, BigDecimal.ZERO, BigDecimal.ZERO);
+    }
+  }
 }

@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.*;
 
+import com.kite.trading.dto.IndexQuote;
 import com.kite.trading.dto.OiAnalysisResult;
 import com.kite.trading.dto.OiDataSnapshot;
 import com.kite.trading.dto.OptionChainData;
@@ -11,7 +12,11 @@ import com.kite.trading.dto.OptionChainData.OptionContract;
 import com.kite.trading.dto.OptionChainData.OptionData;
 import com.kite.trading.dto.OptionChainData.Records;
 import java.math.BigDecimal;
+import java.time.Clock;
 import java.time.DayOfWeek;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -30,7 +35,9 @@ class OiAnalysisServiceTest {
 
   @BeforeEach
   void setUp() {
-    service = new OiAnalysisService(nseClient, telegramService);
+    final Clock morningClock =
+        Clock.fixed(Instant.parse("2026-07-16T04:30:00Z"), ZoneId.of("Asia/Kolkata"));
+    service = new OiAnalysisService(nseClient, telegramService, morningClock);
   }
 
   @Test
@@ -147,7 +154,8 @@ class OiAnalysisServiceTest {
     final var secondOption =
         optionData(
             BigDecimal.valueOf(24200),
-            contract(BigDecimal.valueOf(10500), BigDecimal.valueOf(1000)),
+            contractWithPremium(
+                BigDecimal.valueOf(10500), BigDecimal.valueOf(1000), BigDecimal.valueOf(35)),
             contract(BigDecimal.valueOf(5100), BigDecimal.valueOf(200)));
 
     when(nseClient.fetchOptionChain(anyString()))
@@ -181,9 +189,10 @@ class OiAnalysisServiceTest {
 
     final var secondOption =
         optionData(
-            BigDecimal.valueOf(24200),
+            BigDecimal.valueOf(24300),
             contract(BigDecimal.valueOf(5100), BigDecimal.valueOf(200)),
-            contract(BigDecimal.valueOf(10800), BigDecimal.valueOf(1000)));
+            contractWithPremium(
+                BigDecimal.valueOf(10800), BigDecimal.valueOf(1000), BigDecimal.valueOf(35)));
 
     when(nseClient.fetchOptionChain(anyString()))
         .thenReturn(
@@ -201,22 +210,30 @@ class OiAnalysisServiceTest {
 
   @Test
   void analyzeAndPredict_returnsNeutral_whenOiChangesAreBalanced() {
-    final var option =
+    final var putOption =
         optionData(
             BigDecimal.valueOf(24200),
-            contract(BigDecimal.valueOf(8000), BigDecimal.valueOf(300)),
-            contract(BigDecimal.valueOf(8000), BigDecimal.valueOf(300)));
+            contractWithPremium(
+                BigDecimal.valueOf(8000), BigDecimal.valueOf(300), BigDecimal.valueOf(35)),
+            null);
+    final var callOption =
+        optionData(
+            BigDecimal.valueOf(24300),
+            null,
+            contractWithPremium(
+                BigDecimal.valueOf(8000), BigDecimal.valueOf(300), BigDecimal.valueOf(35)));
+    final var options = List.of(putOption, callOption);
 
     when(nseClient.fetchOptionChain(anyString()))
         .thenReturn(
             new OptionChainData(
-                new Records(null, List.of(option), null, BigDecimal.valueOf(24200), null), null));
+                new Records(null, options, null, BigDecimal.valueOf(24200), null), null));
     service.fetchAndRecordOi();
 
     when(nseClient.fetchOptionChain(anyString()))
         .thenReturn(
             new OptionChainData(
-                new Records(null, List.of(option), null, BigDecimal.valueOf(24250), null), null));
+                new Records(null, options, null, BigDecimal.valueOf(24250), null), null));
     service.fetchAndRecordOi();
 
     final OiAnalysisResult result = service.analyzeAndPredict();
@@ -536,6 +553,109 @@ class OiAnalysisServiceTest {
     verify(telegramService, atLeastOnce())
         .sendMessage(
             argThat(msg -> msg.contains("Profit target reached") || msg.contains("PROFIT_TARGET")));
+  }
+
+  @Test
+  void cumulativeNormalDistribution_returnsHalfForZero() {
+    assertEquals(0.5, OiAnalysisService.cumulativeNormalDistribution(0.0), 0.0001);
+  }
+
+  @Test
+  void calculateDelta_returnsCorrectValuesForAtmOptions() {
+    double callDelta = OiAnalysisService.calculateDelta(24000.0, 24000.0, 15.0, 5.0, true);
+    assertEquals(0.5, callDelta, 0.1);
+
+    double putDelta = OiAnalysisService.calculateDelta(24000.0, 24000.0, 15.0, 5.0, false);
+    assertEquals(-0.5, putDelta, 0.1);
+  }
+
+  @Test
+  void notifyExitIfNeeded_triggersTimeSquareOff_after310PM() {
+    final Clock fixedClock =
+        Clock.fixed(Instant.parse("2026-07-16T09:45:00Z"), ZoneId.of("Asia/Kolkata"));
+    final OiAnalysisService serviceWithFixedClock =
+        new OiAnalysisService(nseClient, telegramService, fixedClock);
+
+    final var peSellContract =
+        contractWithPremium(
+            BigDecimal.valueOf(5000), BigDecimal.valueOf(100), BigDecimal.valueOf(35));
+    final var peHedgeContract =
+        contractWithPremium(
+            BigDecimal.valueOf(3000), BigDecimal.valueOf(50), BigDecimal.valueOf(10));
+    final var option1 = new OptionData(BigDecimal.valueOf(24200), null, null, peSellContract);
+    final var option2 = new OptionData(BigDecimal.valueOf(24050), null, null, peHedgeContract);
+    final var chain =
+        new OptionChainData(
+            new Records(
+                List.of("16-Jul-2026"),
+                List.of(option1, option2),
+                null,
+                BigDecimal.valueOf(24250),
+                null),
+            null);
+
+    when(nseClient.fetchOptionChain(anyString())).thenReturn(chain);
+
+    serviceWithFixedClock.fetchAndRecordOi();
+    serviceWithFixedClock.analyzeAndPredict();
+    serviceWithFixedClock.markPositionEntered();
+
+    serviceWithFixedClock.notifyExitIfNeeded();
+
+    verify(telegramService, atLeastOnce())
+        .sendMessage(argThat(msg -> msg.contains("TIME-BASED SQUARE-OFF")));
+  }
+
+  @Test
+  void buildZerodhaSymbol_returnsCorrectFormat() {
+    String symbol =
+        service.buildZerodhaSymbol(
+            "NIFTY", LocalDate.of(2026, 7, 16), BigDecimal.valueOf(24100), "PE");
+    assertEquals("NIFTY2671624100PE", symbol);
+
+    // Test October single character code
+    String symbolOct =
+        service.buildZerodhaSymbol(
+            "NIFTY", LocalDate.of(2026, 10, 15), BigDecimal.valueOf(24100), "CE");
+    assertEquals("NIFTY26O1524100CE", symbolOct);
+  }
+
+  @Test
+  void pickStrikes_returnsEmptyList_onLowVix() {
+    // Mock VIX client to return low VIX (e.g. 10.0)
+    final var vixQuote =
+        new IndexQuote(
+            List.of(
+                new IndexQuote.IndexData("VIX", null, null, null, BigDecimal.valueOf(10.0), null)));
+    when(nseClient.fetchIndexQuote("VIX")).thenReturn(vixQuote);
+    final var indexQuote =
+        new IndexQuote(
+            List.of(
+                new IndexQuote.IndexData(
+                    "SENSEX", null, null, null, null, BigDecimal.valueOf(24250))));
+    when(nseClient.fetchIndexQuote("SENSEX")).thenReturn(indexQuote);
+
+    // Setup some option data snapshots
+    final var peSellContract =
+        contractWithPremium(
+            BigDecimal.valueOf(5000), BigDecimal.valueOf(100), BigDecimal.valueOf(35));
+    final var option1 = new OptionData(BigDecimal.valueOf(24200), null, null, peSellContract);
+    final var chain =
+        new OptionChainData(
+            new Records(
+                List.of("16-Jul-2026"), List.of(option1), null, BigDecimal.valueOf(24250), null),
+            null);
+
+    when(nseClient.fetchOptionChain(anyString())).thenReturn(chain);
+
+    service.fetchAndRecordOi();
+    final OiAnalysisResult result = service.analyzeAndPredict();
+
+    assertNotNull(result);
+    assertEquals("NEUTRAL", result.direction());
+    assertEquals("NO_TRADE", result.suggestedStrategy());
+    assertTrue(result.suggestedStrikes().isEmpty());
+    assertTrue(result.tradeRecommendation().contains("NO TRADE"));
   }
 
   private static OptionData optionData(
