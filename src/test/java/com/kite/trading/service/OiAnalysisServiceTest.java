@@ -1,6 +1,7 @@
 package com.kite.trading.service;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.*;
 
 import com.kite.trading.dto.OiAnalysisResult;
@@ -10,6 +11,7 @@ import com.kite.trading.dto.OptionChainData.OptionContract;
 import com.kite.trading.dto.OptionChainData.OptionData;
 import com.kite.trading.dto.OptionChainData.Records;
 import java.math.BigDecimal;
+import java.time.DayOfWeek;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -33,7 +35,7 @@ class OiAnalysisServiceTest {
 
   @Test
   void fetchAndRecordOi_returnsNull_whenDataIsNull() {
-    when(nseClient.fetchOptionChain()).thenReturn(null);
+    when(nseClient.fetchOptionChain(anyString())).thenReturn(null);
 
     final OiDataSnapshot result = service.fetchAndRecordOi();
 
@@ -43,7 +45,7 @@ class OiAnalysisServiceTest {
 
   @Test
   void fetchAndRecordOi_returnsNull_whenRecordsIsNull() {
-    when(nseClient.fetchOptionChain()).thenReturn(new OptionChainData(null, null));
+    when(nseClient.fetchOptionChain(anyString())).thenReturn(new OptionChainData(null, null));
 
     final OiDataSnapshot result = service.fetchAndRecordOi();
 
@@ -53,7 +55,7 @@ class OiAnalysisServiceTest {
   @Test
   void fetchAndRecordOi_returnsNull_whenUnderlyingIsNull() {
     final var options = List.of(optionData(BigDecimal.valueOf(24200), null, null));
-    when(nseClient.fetchOptionChain())
+    when(nseClient.fetchOptionChain(anyString()))
         .thenReturn(new OptionChainData(new Records(null, options, null, null, null), null));
 
     final OiDataSnapshot result = service.fetchAndRecordOi();
@@ -74,7 +76,7 @@ class OiAnalysisServiceTest {
             contract(BigDecimal.valueOf(5000), BigDecimal.valueOf(300)),
             contract(BigDecimal.valueOf(6000), BigDecimal.valueOf(400)));
 
-    when(nseClient.fetchOptionChain())
+    when(nseClient.fetchOptionChain(anyString()))
         .thenReturn(
             new OptionChainData(
                 new Records(
@@ -96,7 +98,7 @@ class OiAnalysisServiceTest {
             contract(BigDecimal.valueOf(10000), BigDecimal.valueOf(500)),
             contract(BigDecimal.valueOf(5000), BigDecimal.valueOf(300)));
 
-    when(nseClient.fetchOptionChain())
+    when(nseClient.fetchOptionChain(anyString()))
         .thenReturn(
             new OptionChainData(
                 new Records(null, List.of(option), null, BigDecimal.valueOf(24200), null), null));
@@ -115,7 +117,7 @@ class OiAnalysisServiceTest {
             contract(BigDecimal.valueOf(5000), BigDecimal.valueOf(1000)),
             contract(BigDecimal.valueOf(6000), BigDecimal.valueOf(800)));
 
-    when(nseClient.fetchOptionChain())
+    when(nseClient.fetchOptionChain(anyString()))
         .thenReturn(
             new OptionChainData(
                 new Records(null, List.of(option), null, BigDecimal.valueOf(24200), null), null));
@@ -135,7 +137,7 @@ class OiAnalysisServiceTest {
             contract(BigDecimal.valueOf(10000), BigDecimal.valueOf(500)),
             contract(BigDecimal.valueOf(5000), BigDecimal.valueOf(100)));
 
-    when(nseClient.fetchOptionChain())
+    when(nseClient.fetchOptionChain(anyString()))
         .thenReturn(
             new OptionChainData(
                 new Records(null, List.of(firstOption), null, BigDecimal.valueOf(24200), null),
@@ -148,7 +150,7 @@ class OiAnalysisServiceTest {
             contract(BigDecimal.valueOf(10500), BigDecimal.valueOf(1000)),
             contract(BigDecimal.valueOf(5100), BigDecimal.valueOf(200)));
 
-    when(nseClient.fetchOptionChain())
+    when(nseClient.fetchOptionChain(anyString()))
         .thenReturn(
             new OptionChainData(
                 new Records(null, List.of(secondOption), null, BigDecimal.valueOf(24250), null),
@@ -159,7 +161,7 @@ class OiAnalysisServiceTest {
 
     assertNotNull(result);
     assertEquals("BULLISH", result.direction());
-    assertEquals("PUT CREDIT SPREAD", result.suggestedStrategy());
+    assertEquals("DIRECTIONAL PUT SELLING", result.suggestedStrategy());
   }
 
   @Test
@@ -170,7 +172,7 @@ class OiAnalysisServiceTest {
             contract(BigDecimal.valueOf(5000), BigDecimal.valueOf(100)),
             contract(BigDecimal.valueOf(10000), BigDecimal.valueOf(200)));
 
-    when(nseClient.fetchOptionChain())
+    when(nseClient.fetchOptionChain(anyString()))
         .thenReturn(
             new OptionChainData(
                 new Records(null, List.of(firstOption), null, BigDecimal.valueOf(24200), null),
@@ -183,7 +185,7 @@ class OiAnalysisServiceTest {
             contract(BigDecimal.valueOf(5100), BigDecimal.valueOf(200)),
             contract(BigDecimal.valueOf(10800), BigDecimal.valueOf(1000)));
 
-    when(nseClient.fetchOptionChain())
+    when(nseClient.fetchOptionChain(anyString()))
         .thenReturn(
             new OptionChainData(
                 new Records(null, List.of(secondOption), null, BigDecimal.valueOf(24250), null),
@@ -194,7 +196,7 @@ class OiAnalysisServiceTest {
 
     assertNotNull(result);
     assertEquals("BEARISH", result.direction());
-    assertEquals("CALL CREDIT SPREAD", result.suggestedStrategy());
+    assertEquals("DIRECTIONAL CALL SELLING", result.suggestedStrategy());
   }
 
   @Test
@@ -205,13 +207,13 @@ class OiAnalysisServiceTest {
             contract(BigDecimal.valueOf(8000), BigDecimal.valueOf(300)),
             contract(BigDecimal.valueOf(8000), BigDecimal.valueOf(300)));
 
-    when(nseClient.fetchOptionChain())
+    when(nseClient.fetchOptionChain(anyString()))
         .thenReturn(
             new OptionChainData(
                 new Records(null, List.of(option), null, BigDecimal.valueOf(24200), null), null));
     service.fetchAndRecordOi();
 
-    when(nseClient.fetchOptionChain())
+    when(nseClient.fetchOptionChain(anyString()))
         .thenReturn(
             new OptionChainData(
                 new Records(null, List.of(option), null, BigDecimal.valueOf(24250), null), null));
@@ -221,7 +223,7 @@ class OiAnalysisServiceTest {
 
     assertNotNull(result);
     assertEquals("NEUTRAL", result.direction());
-    assertEquals("IRON CONDOR", result.suggestedStrategy());
+    assertEquals("SHORT STRANGLE", result.suggestedStrategy());
   }
 
   @Test
@@ -237,7 +239,7 @@ class OiAnalysisServiceTest {
             contract(BigDecimal.valueOf(5000), BigDecimal.valueOf(500)),
             contract(BigDecimal.valueOf(5000), BigDecimal.valueOf(200)));
 
-    when(nseClient.fetchOptionChain())
+    when(nseClient.fetchOptionChain(anyString()))
         .thenReturn(
             new OptionChainData(
                 new Records(null, List.of(opt1), null, BigDecimal.valueOf(24200), null), null));
@@ -251,7 +253,7 @@ class OiAnalysisServiceTest {
             contract(BigDecimal.valueOf(10000), BigDecimal.valueOf(1500)),
             contract(BigDecimal.valueOf(1000), BigDecimal.valueOf(200)));
 
-    when(nseClient.fetchOptionChain())
+    when(nseClient.fetchOptionChain(anyString()))
         .thenReturn(
             new OptionChainData(
                 new Records(null, List.of(opt2), null, BigDecimal.valueOf(24250), null), null));
@@ -268,7 +270,7 @@ class OiAnalysisServiceTest {
             contract(BigDecimal.valueOf(5000), BigDecimal.valueOf(100)),
             contract(BigDecimal.valueOf(5000), BigDecimal.valueOf(100)));
 
-    when(nseClient.fetchOptionChain())
+    when(nseClient.fetchOptionChain(anyString()))
         .thenReturn(
             new OptionChainData(
                 new Records(null, List.of(option), null, BigDecimal.valueOf(24200), null), null));
@@ -288,7 +290,7 @@ class OiAnalysisServiceTest {
             contract(BigDecimal.valueOf(10000), BigDecimal.valueOf(500)),
             contract(BigDecimal.valueOf(5000), BigDecimal.valueOf(100)));
 
-    when(nseClient.fetchOptionChain())
+    when(nseClient.fetchOptionChain(anyString()))
         .thenReturn(
             new OptionChainData(
                 new Records(null, List.of(firstOption), null, BigDecimal.valueOf(24200), null),
@@ -301,7 +303,7 @@ class OiAnalysisServiceTest {
             contract(BigDecimal.valueOf(10500), BigDecimal.valueOf(1000)),
             contract(BigDecimal.valueOf(5000), BigDecimal.valueOf(100)));
 
-    when(nseClient.fetchOptionChain())
+    when(nseClient.fetchOptionChain(anyString()))
         .thenReturn(
             new OptionChainData(
                 new Records(null, List.of(secondOption), null, BigDecimal.valueOf(24250), null),
@@ -344,9 +346,40 @@ class OiAnalysisServiceTest {
 
   @Test
   void notifyOiUpdate_doesNotSend_whenDataIsNull() {
-    when(nseClient.fetchOptionChain()).thenReturn(null);
+    when(nseClient.fetchOptionChain(anyString())).thenReturn(null);
     service.notifyOiUpdate();
     verify(telegramService, never()).sendMessage(anyString());
+  }
+
+  @Test
+  void resolveIndexForDay_returnsNiftyOnMonday() {
+    assertEquals("NIFTY", OiAnalysisService.resolveIndexForDay(DayOfWeek.MONDAY));
+  }
+
+  @Test
+  void resolveIndexForDay_returnsNiftyOnTuesday() {
+    assertEquals("NIFTY", OiAnalysisService.resolveIndexForDay(DayOfWeek.TUESDAY));
+  }
+
+  @Test
+  void resolveIndexForDay_returnsSensexOnWednesday() {
+    assertEquals("SENSEX", OiAnalysisService.resolveIndexForDay(DayOfWeek.WEDNESDAY));
+  }
+
+  @Test
+  void resolveIndexForDay_returnsSensexOnThursday() {
+    assertEquals("SENSEX", OiAnalysisService.resolveIndexForDay(DayOfWeek.THURSDAY));
+  }
+
+  @Test
+  void resolveIndexForDay_returnsNiftyOnFriday() {
+    assertEquals("NIFTY", OiAnalysisService.resolveIndexForDay(DayOfWeek.FRIDAY));
+  }
+
+  @Test
+  void resolveIndexForDay_returnsNiftyOnWeekend() {
+    assertEquals("NIFTY", OiAnalysisService.resolveIndexForDay(DayOfWeek.SATURDAY));
+    assertEquals("NIFTY", OiAnalysisService.resolveIndexForDay(DayOfWeek.SUNDAY));
   }
 
   private static OptionData optionData(

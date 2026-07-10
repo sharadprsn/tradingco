@@ -11,7 +11,11 @@ public record OiAnalysisResult(
     @JsonProperty("suggestedStrategy") String suggestedStrategy,
     @JsonProperty("suggestedStrikes") List<BigDecimal> suggestedStrikes,
     @JsonProperty("reasoning") String reasoning,
-    @JsonProperty("tradeRecommendation") String tradeRecommendation) {
+    @JsonProperty("tradeRecommendation") String tradeRecommendation,
+    @JsonProperty("vix") BigDecimal vix,
+    @JsonProperty("indexOpen") BigDecimal indexOpen,
+    @JsonProperty("largestPeOiStrike") BigDecimal largestPeOiStrike,
+    @JsonProperty("largestCeOiStrike") BigDecimal largestCeOiStrike) {
   public OiAnalysisResult {
     if (tradeRecommendation == null) {
       tradeRecommendation = "";

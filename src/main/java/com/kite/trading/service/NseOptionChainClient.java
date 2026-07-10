@@ -38,13 +38,17 @@ public class NseOptionChainClient implements OptionChainClient {
   }
 
   public OptionChainData fetchOptionChain() {
+    return fetchOptionChain("NIFTY");
+  }
+
+  public OptionChainData fetchOptionChain(final String symbol) {
     ensureSession();
-    final String expiry = resolveNearestExpiry();
+    final String expiry = resolveNearestExpiry(symbol);
     if (expiry == null) {
-      logger.warn("Could not resolve any expiry date, returning empty response");
+      logger.warn("Could not resolve any expiry date for {}, returning empty response", symbol);
       return emptyResponse();
     }
-    return fetchData(expiry);
+    return fetchData(expiry, symbol);
   }
 
   private void ensureSession() {
@@ -95,12 +99,13 @@ public class NseOptionChainClient implements OptionChainClient {
     }
   }
 
-  private String resolveNearestExpiry() {
+  private String resolveNearestExpiry(final String symbol) {
     try {
+      final String url = nseConfig.getContractInfoUrl(symbol);
       final String raw =
           webClient
               .get()
-              .uri(nseConfig.getContractInfoUrl())
+              .uri(url)
               .header("User-Agent", nseConfig.getUserAgent())
               .header("Accept", MediaType.APPLICATION_JSON_VALUE)
               .header("Accept-Language", "en-US,en;q=0.9")
@@ -110,33 +115,32 @@ public class NseOptionChainClient implements OptionChainClient {
               .bodyToMono(String.class)
               .block();
       if (raw == null || raw.isBlank()) {
-        logger.warn("NSE contract info response is empty");
+        logger.warn("NSE contract info response is empty for {}", symbol);
         return null;
       }
       final JsonNode root = objectMapper.readTree(raw);
       final JsonNode expiryDates = root.get("expiryDates");
       if (expiryDates == null || !expiryDates.isArray() || expiryDates.isEmpty()) {
-        logger.warn(
-            "NSE contract info has no expiryDates: {}",
-            raw.substring(0, Math.min(200, raw.length())));
+        logger.warn("NSE contract info for {} has no expiryDates", symbol);
         return null;
       }
       final String nearest = expiryDates.get(0).asText();
-      logger.debug("Resolved nearest NSE expiry: {}", nearest);
+      logger.debug("Resolved nearest NSE expiry for {}: {}", symbol, nearest);
       return nearest;
     } catch (final Exception e) {
       logger.error(
-          "Failed to resolve NSE expiry dates: {} {}",
+          "Failed to resolve NSE expiry dates for {}: {} {}",
+          symbol,
           e.getClass().getSimpleName(),
           e.getMessage());
     }
     return null;
   }
 
-  private OptionChainData fetchData(final String expiry) {
+  private OptionChainData fetchData(final String expiry, final String symbol) {
     try {
-      final String url = nseConfig.getOptionChainUrl() + "&expiry=" + expiry;
-      logger.debug("Fetching NSE option chain for expiry {}", expiry);
+      final String url = nseConfig.getOptionChainUrl(symbol) + "&expiry=" + expiry;
+      logger.debug("Fetching NSE option chain for {} expiry {}", symbol, expiry);
       final V3FullResponse v3 =
           webClient
               .get()
@@ -152,7 +156,8 @@ public class NseOptionChainClient implements OptionChainClient {
       return convert(v3);
     } catch (final Exception e) {
       logger.error(
-          "Failed to fetch NSE option chain data: {} {}",
+          "Failed to fetch NSE option chain for {}: {} {}",
+          symbol,
           e.getClass().getSimpleName(),
           e.getMessage());
       sessionCookie = null;
@@ -259,12 +264,13 @@ public class NseOptionChainClient implements OptionChainClient {
         new OptionChainData.Filtered(Collections.emptyList(), null, null, Collections.emptyList()));
   }
 
-  public IndexQuote fetchIndexQuote() {
+  public IndexQuote fetchIndexQuote(final String symbol) {
     try {
-      logger.debug("Fetching NSE index quote from {}", nseConfig.getIndexQuoteUrl());
+      final String url = nseConfig.getIndexQuoteUrl(symbol);
+      logger.debug("Fetching NSE index quote for {} from {}", symbol, url);
       return webClient
           .get()
-          .uri(nseConfig.getIndexQuoteUrl())
+          .uri(url)
           .header("User-Agent", nseConfig.getUserAgent())
           .header("Accept", MediaType.APPLICATION_JSON_VALUE)
           .header("Accept-Language", "en-US,en;q=0.9")
@@ -275,9 +281,16 @@ public class NseOptionChainClient implements OptionChainClient {
           .block();
     } catch (final Exception e) {
       logger.error(
-          "Failed to fetch NSE index quote: {} {}", e.getClass().getSimpleName(), e.getMessage());
+          "Failed to fetch NSE index quote for {}: {} {}",
+          symbol,
+          e.getClass().getSimpleName(),
+          e.getMessage());
       return null;
     }
+  }
+
+  public IndexQuote fetchIndexQuote() {
+    return fetchIndexQuote("NIFTY");
   }
 
   // ---- V3-specific DTOs (inner records) ----

@@ -13,7 +13,9 @@ public record OiDataSnapshot(
     @JsonProperty("totalPeOiChange") BigDecimal totalPeOiChange,
     @JsonProperty("totalCeOiChange") BigDecimal totalCeOiChange,
     @JsonProperty("pcr") BigDecimal pcr,
-    @JsonProperty("topOiBuildUp") List<OiStrikeInfo> topOiBuildUp) {
+    @JsonProperty("topOiBuildUp") List<OiStrikeInfo> topOiBuildUp,
+    @JsonProperty("largestPeOiStrike") BigDecimal largestPeOiStrike,
+    @JsonProperty("largestCeOiStrike") BigDecimal largestCeOiStrike) {
   public record OiStrikeInfo(
       @JsonProperty("strikePrice") BigDecimal strikePrice,
       @JsonProperty("optionType") String optionType,

@@ -1,5 +1,6 @@
 package com.kite.trading.config;
 
+import java.util.Map;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
 
@@ -7,23 +8,35 @@ import org.springframework.context.annotation.Configuration;
 @ConfigurationProperties(prefix = "nse")
 public class NseConfig {
 
-  private String optionChainUrl =
-      "https://www.nseindia.com/api/option-chain-v3?type=Indices&symbol=NIFTY";
-  private String contractInfoUrl =
-      "https://www.nseindia.com/api/option-chain-contract-info?symbol=NIFTY";
+  private static final String OC_BASE =
+      "https://www.nseindia.com/api/option-chain-v3?type=Indices&symbol=";
+  private static final String CI_BASE =
+      "https://www.nseindia.com/api/option-chain-contract-info?symbol=";
+
+  private static final Map<String, String> SYMBOL_TICKER =
+      Map.of(
+          "NIFTY", "NIFTY%2050",
+          "BANKNIFTY", "NIFTY%20BANK",
+          "FINNIFTY", "FINNIFTY",
+          "VIX", "INDIA%20VIX");
+
   private String homeUrl = "https://www.nseindia.com/option-chain";
   private String userAgent =
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-  private String indexQuoteUrl = "https://www.nseindia.com/api/quote-indices?indices=NIFTY%2050";
 
   public NseConfig() {}
 
-  public String getOptionChainUrl() {
-    return optionChainUrl;
+  public String getOptionChainUrl(final String symbol) {
+    return OC_BASE + symbol;
   }
 
-  public void setOptionChainUrl(final String optionChainUrl) {
-    this.optionChainUrl = optionChainUrl;
+  public String getContractInfoUrl(final String symbol) {
+    return CI_BASE + symbol;
+  }
+
+  public String getIndexQuoteUrl(final String symbol) {
+    final String ticker = SYMBOL_TICKER.getOrDefault(symbol, "NIFTY%2050");
+    return "https://www.nseindia.com/api/quote-indices?indices=" + ticker;
   }
 
   public String getHomeUrl() {
@@ -34,27 +47,11 @@ public class NseConfig {
     this.homeUrl = homeUrl;
   }
 
-  public String getContractInfoUrl() {
-    return contractInfoUrl;
-  }
-
-  public void setContractInfoUrl(final String contractInfoUrl) {
-    this.contractInfoUrl = contractInfoUrl;
-  }
-
   public String getUserAgent() {
     return userAgent;
   }
 
   public void setUserAgent(final String userAgent) {
     this.userAgent = userAgent;
-  }
-
-  public String getIndexQuoteUrl() {
-    return indexQuoteUrl;
-  }
-
-  public void setIndexQuoteUrl(final String indexQuoteUrl) {
-    this.indexQuoteUrl = indexQuoteUrl;
   }
 }

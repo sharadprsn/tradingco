@@ -20,9 +20,9 @@ class NseConnectivityTest {
   @Test
   void verifyNseConfig() {
     assertNotNull(nseConfig.getHomeUrl());
-    assertNotNull(nseConfig.getOptionChainUrl());
+    assertNotNull(nseConfig.getOptionChainUrl("NIFTY"));
     assertNotNull(nseConfig.getUserAgent());
-    assertTrue(nseConfig.getOptionChainUrl().contains("NIFTY"));
+    assertTrue(nseConfig.getOptionChainUrl("NIFTY").contains("NIFTY"));
   }
 
   @Test

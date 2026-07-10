@@ -9,6 +9,7 @@ import com.kite.trading.dto.OptionChainData;
 import com.kite.trading.dto.OptionChainData.OptionData;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.DayOfWeek;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -36,22 +37,21 @@ public class OiAnalysisService {
   private static final LocalTime PREDICTION_TIME = LocalTime.of(10, 0);
   private static final BigDecimal PCR_BULLISH_THRESHOLD = BigDecimal.valueOf(1.2);
   private static final BigDecimal PCR_BEARISH_THRESHOLD = BigDecimal.valueOf(0.8);
-  private static final BigDecimal OI_CHANGE_SIGNIFICANCE = BigDecimal.valueOf(20);
   private static final int TOP_STRIKES_COUNT = 5;
   private static final int NEAR_STRIKE_RANGE = 5;
-  private static final int STRIKE_INTERVAL = 50;
+  private static final int STRIKE_INTERVAL_NIFTY = 50;
+  private static final int STRIKE_INTERVAL_SENSEX = 100;
   private static final BigDecimal EXIT_PCR_SHIFT = BigDecimal.valueOf(0.3);
   private static final BigDecimal EXIT_OI_SURGE = BigDecimal.valueOf(50);
   private static final BigDecimal MIN_PCR_CHANGE_FOR_NOTIFICATION = BigDecimal.valueOf(0.05);
   private static final BigDecimal MIN_OI_CHANGE_FRACTION = BigDecimal.valueOf(0.05);
 
-  // === Exit strategy improvement constants ===
+  // === Exit strategy constants ===
   private static final int CONFIRMATION_CONSECUTIVE = 2;
   private static final int PCR_VOLATILITY_WINDOW = 8;
   private static final BigDecimal PCR_VOLATILITY_MULTIPLIER = BigDecimal.valueOf(2);
   private static final int DIRECTION_ROLLING_WINDOW = 3;
   private static final long EXIT_COOLDOWN_MINUTES = 15;
-  private static final BigDecimal EXIT_CONFIDENCE_THRESHOLD = BigDecimal.valueOf(50);
   private static final BigDecimal PRICE_CONFIRMATION_PCT = BigDecimal.valueOf(0.5);
   private static final int DAYS_TO_EXPIRY_DAMPENING = 2;
   private static final BigDecimal TIME_DECAY_FACTOR = BigDecimal.valueOf(1.5);
@@ -64,19 +64,9 @@ public class OiAnalysisService {
   private static final BigDecimal AFTERNOON_THRESHOLD_MULTIPLIER = BigDecimal.valueOf(0.5);
   private static final int STRONG_SIGNAL_CONFIRMATION_REQUIRED = 1;
 
-  // === SuperTrend constants (15-min timeframe = 3 snapshots at 6-min intervals) ===
+  // === SuperTrend constants ===
   private static final int SUPERTREND_PERIOD = 3;
   private static final BigDecimal SUPERTREND_MULTIPLIER = BigDecimal.valueOf(3);
-
-  // === Strike selection improvement constants ===
-  private static final int STRIKE_WEIGHT_MIN_STRIKE = 1;
-  private static final BigDecimal CREDIT_RISK_MIN_RATIO = BigDecimal.valueOf(0.25);
-  private static final BigDecimal OI_CHANGE_Z_SCORE_THRESHOLD = BigDecimal.valueOf(2.0);
-  private static final int VOLATILITY_WINDOW = 5;
-  private static final BigDecimal BASE_SPREAD_MULTIPLIER = BigDecimal.valueOf(0.8);
-  private static final BigDecimal MAX_SPREAD_MULTIPLIER = BigDecimal.valueOf(2.5);
-  private static final BigDecimal HIGH_CONFIDENCE_THRESHOLD = BigDecimal.valueOf(80);
-  private static final int MAX_HEDGE_STRIKES = 3;
 
   private final OptionChainClient optionChainClient;
   private final TelegramService telegramService;
@@ -101,7 +91,35 @@ public class OiAnalysisService {
   private volatile Instant lastExitFiredAt = Instant.MIN;
   private volatile BigDecimal highestPriceSinceEntry = BigDecimal.ZERO;
   private volatile BigDecimal lowestPriceSinceEntry = BigDecimal.ZERO;
+  private volatile BigDecimal entrySoldStrike = BigDecimal.ZERO;
+  private volatile String entryStrikeType = ""; // "PE" or "CE"
   private volatile boolean earlyWarningSent;
+
+  private volatile String currentIndex = "NIFTY";
+
+  static String resolveIndexForDay() {
+    return resolveIndexForDay(LocalDate.now(IST).getDayOfWeek());
+  }
+
+  static String resolveIndexForDay(final DayOfWeek day) {
+    return switch (day) {
+      case MONDAY, TUESDAY, FRIDAY -> "NIFTY";
+      case WEDNESDAY, THURSDAY -> "SENSEX";
+      default -> "NIFTY";
+    };
+  }
+
+  private int strikeInterval() {
+    return "SENSEX".equals(currentIndex) ? STRIKE_INTERVAL_SENSEX : STRIKE_INTERVAL_NIFTY;
+  }
+
+  private String indexLabel() {
+    return "SENSEX".equals(currentIndex) ? "SENSEX" : "Nifty";
+  }
+
+  public String getCurrentIndexLabel() {
+    return indexLabel();
+  }
 
   public OiAnalysisService(
       final OptionChainClient optionChainClient, final TelegramService telegramService) {
@@ -110,9 +128,10 @@ public class OiAnalysisService {
   }
 
   public OiDataSnapshot fetchAndRecordOi() {
-    final OptionChainData data = optionChainClient.fetchOptionChain();
+    this.currentIndex = resolveIndexForDay();
+    final OptionChainData data = optionChainClient.fetchOptionChain(currentIndex);
     if (data == null || data.records() == null || data.records().data() == null) {
-      logger.warn("No option chain data available");
+      logger.warn("No option chain data available for {}", currentIndex);
       return null;
     }
 
@@ -130,20 +149,43 @@ public class OiAnalysisService {
     final List<OptionData> allOptions = data.records().data();
     final BigDecimal underlying = data.records().underlyingValue();
     if (underlying == null) {
-      logger.warn("Underlying value not available");
+      logger.warn("Underlying value not available for {}", currentIndex);
       return null;
     }
 
-    final BigDecimal atmStrike = roundToNearestStrike(underlying);
+    final int interval = strikeInterval();
+    final BigDecimal atmStrike = roundToNearestStrike(underlying, interval);
     final BigDecimal minStrike =
-        atmStrike.subtract(BigDecimal.valueOf(NEAR_STRIKE_RANGE * STRIKE_INTERVAL));
-    final BigDecimal maxStrike =
-        atmStrike.add(BigDecimal.valueOf(NEAR_STRIKE_RANGE * STRIKE_INTERVAL));
+        atmStrike.subtract(BigDecimal.valueOf(NEAR_STRIKE_RANGE * interval));
+    final BigDecimal maxStrike = atmStrike.add(BigDecimal.valueOf(NEAR_STRIKE_RANGE * interval));
 
     BigDecimal totalPeOi = BigDecimal.ZERO;
     BigDecimal totalCeOi = BigDecimal.ZERO;
     BigDecimal totalPeOiChange = BigDecimal.ZERO;
     BigDecimal totalCeOiChange = BigDecimal.ZERO;
+
+    BigDecimal maxPeOi = BigDecimal.ZERO;
+    BigDecimal maxCeOi = BigDecimal.ZERO;
+    BigDecimal maxPeOiStrike = BigDecimal.ZERO;
+    BigDecimal maxCeOiStrike = BigDecimal.ZERO;
+
+    for (final OptionData option : allOptions) {
+      if (option.strikePrice() == null) continue;
+      if (option.pe() != null) {
+        final BigDecimal oi = safeOi(option.pe().openInterest());
+        if (oi.compareTo(maxPeOi) > 0) {
+          maxPeOi = oi;
+          maxPeOiStrike = option.strikePrice();
+        }
+      }
+      if (option.ce() != null) {
+        final BigDecimal oi = safeOi(option.ce().openInterest());
+        if (oi.compareTo(maxCeOi) > 0) {
+          maxCeOi = oi;
+          maxCeOiStrike = option.strikePrice();
+        }
+      }
+    }
 
     final List<OiStrikeInfo> buildUpList = new ArrayList<>();
 
@@ -197,11 +239,14 @@ public class OiAnalysisService {
             totalPeOiChange,
             totalCeOiChange,
             pcr,
-            topBuildUp);
+            topBuildUp,
+            maxPeOiStrike,
+            maxCeOiStrike);
 
     snapshots.add(snapshot);
     logger.info(
-        "OI snapshot recorded: PCR={}, Underlying={}, PE Change={}, CE Change={}",
+        "OI snapshot recorded for {}: PCR={}, Underlying={}, PE Change={}, CE Change={}",
+        currentIndex,
         pcr,
         underlying,
         totalPeOiChange,
@@ -226,15 +271,19 @@ public class OiAnalysisService {
   }
 
   private void recordCandleData() {
-    final IndexQuote quote = optionChainClient.fetchIndexQuote();
+    final IndexQuote quote = optionChainClient.fetchIndexQuote(currentIndex);
     if (quote != null && quote.data() != null && !quote.data().isEmpty()) {
-      final IndexData nifty50 = quote.data().getFirst();
-      if (nifty50.high() != null && nifty50.low() != null) {
-        candleData.add(new CandleData(nifty50.high(), nifty50.low()));
+      final IndexData indexData = quote.data().getFirst();
+      if (indexData.high() != null && indexData.low() != null) {
+        candleData.add(new CandleData(indexData.high(), indexData.low()));
         if (candleData.size() > 100) {
           candleData.remove(0);
         }
-        logger.debug("Index quote recorded: high={}, low={}", nifty50.high(), nifty50.low());
+        logger.debug(
+            "Index quote recorded for {}: high={}, low={}",
+            currentIndex,
+            indexData.high(),
+            indexData.low());
       }
     }
   }
@@ -305,13 +354,12 @@ public class OiAnalysisService {
           .append(" since first snapshot. ");
     }
 
-    final BigDecimal volatilityMultiplier = computeVolatilityMultiplier();
-    final String strategy =
-        suggestStrategy(
-            direction, latest, topBuildUpStrikes(latest, "PE"), topBuildUpStrikes(latest, "CE"));
-    final List<BigDecimal> suggestedStrikes =
-        pickStrikes(direction, latest, volatilityMultiplier, confidence);
+    final String strategy = suggestStrategy(direction);
+    final List<BigDecimal> suggestedStrikes = pickStrikes(direction, latest, confidence);
     final String tradeRecommendation = buildTradeRecommendation(direction, suggestedStrikes);
+
+    final BigDecimal vix = fetchVix();
+    final BigDecimal indexOpen = fetchIndexOpen();
 
     final OiAnalysisResult result =
         new OiAnalysisResult(
@@ -321,16 +369,22 @@ public class OiAnalysisService {
             strategy,
             suggestedStrikes,
             reasoning.toString().strip(),
-            tradeRecommendation);
+            tradeRecommendation,
+            vix,
+            indexOpen,
+            latest.largestPeOiStrike(),
+            latest.largestCeOiStrike());
 
     lastAnalysis.set(result);
     logger.info(
-        "OI Analysis: direction={}, confidence={}, strategy={}, pcr={}, strikes={}",
+        "OI Analysis for {}: direction={}, confidence={}, strategy={}, pcr={}, strikes={}, vix={}",
+        currentIndex,
         direction,
         confidence,
         strategy,
         latestPcr,
-        suggestedStrikes);
+        suggestedStrikes,
+        vix);
 
     return result;
   }
@@ -391,7 +445,9 @@ public class OiAnalysisService {
 
     final StringBuilder sb = new StringBuilder();
     sb.append(emoji)
-        .append(" MARKET PREDICTION (")
+        .append(" ")
+        .append(indexLabel())
+        .append(" PREDICTION (")
         .append(headerLabel)
         .append(") ")
         .append(emoji)
@@ -401,8 +457,32 @@ public class OiAnalysisService {
         .append(result.confidence())
         .append("%")
         .append("\nPCR: ")
-        .append(result.pcr().setScale(2, RoundingMode.HALF_UP))
-        .append("\n\nSuggested Strategy: ")
+        .append(result.pcr().setScale(2, RoundingMode.HALF_UP));
+
+    if (result.vix() != null) {
+      sb.append("\nVIX: ").append(result.vix().setScale(2, RoundingMode.HALF_UP));
+      final BigDecimal dayRange =
+          result.vix().divide(BigDecimal.valueOf(16), 2, RoundingMode.HALF_UP);
+      sb.append("\nDay Range: \u00B1").append(dayRange);
+    }
+
+    if (result.indexOpen() != null) {
+      sb.append("\nOpen: ").append(result.indexOpen().setScale(0, RoundingMode.HALF_UP));
+    }
+
+    if (result.largestPeOiStrike() != null
+        && result.largestPeOiStrike().compareTo(BigDecimal.ZERO) > 0) {
+      sb.append("\nMax PE OI: ")
+          .append(result.largestPeOiStrike().setScale(0, RoundingMode.HALF_UP));
+    }
+
+    if (result.largestCeOiStrike() != null
+        && result.largestCeOiStrike().compareTo(BigDecimal.ZERO) > 0) {
+      sb.append("\nMax CE OI: ")
+          .append(result.largestCeOiStrike().setScale(0, RoundingMode.HALF_UP));
+    }
+
+    sb.append("\n\nSuggested Strategy: ")
         .append(result.suggestedStrategy())
         .append("\nSuggested Strikes: ")
         .append(result.suggestedStrikes());
@@ -437,12 +517,16 @@ public class OiAnalysisService {
     final String message =
         switch (assessment.signal()) {
           case PCR_SHIFT ->
-              "PCR has shifted significantly since entry. Consider closing the position.";
+              "PCR shift detected – market sentiment changing. Consider closing sold options.";
           case DIRECTION_REVERSAL ->
-              "Market direction has reversed based on OI data. Consider closing the position.";
+              "Direction reversal detected – sold options at risk. Consider closing position.";
           case SUPERTREND_REVERSAL ->
-              "15-min SuperTrend reversal detected. Consider closing the position.";
-          case OI_SURGE -> "OI volume surge detected. Consider closing the position.";
+              "SuperTrend reversal detected. Consider closing sold options.";
+          case OI_SURGE ->
+              "OI surge detected – potential volatility ahead. Consider reducing position.";
+          case STRIKE_BREACH ->
+              "Underlying crossed sold strike – option is now ITM. Close position immediately.";
+          case PROFIT_TARGET -> "Profit target reached – option decayed sufficiently. Book profit.";
           default -> "No exit signal.";
         };
 
@@ -462,7 +546,9 @@ public class OiAnalysisService {
     if (currentSnapshot != null) {
       sb.append("\n\nCurrent PCR: ")
           .append(currentSnapshot.pcr().setScale(2, RoundingMode.HALF_UP))
-          .append("\nCurrent Nifty: ")
+          .append("\nCurrent ")
+          .append(indexLabel())
+          .append(": ")
           .append(currentSnapshot.underlyingValue());
     }
 
@@ -614,13 +700,25 @@ public class OiAnalysisService {
       this.highestPriceSinceEntry = current.underlyingValue();
       this.lowestPriceSinceEntry = current.underlyingValue();
     }
+    final OiAnalysisResult analysis = lastAnalysis.get();
+    if (analysis != null && !analysis.suggestedStrikes().isEmpty()) {
+      this.entrySoldStrike = analysis.suggestedStrikes().getFirst();
+      this.entryStrikeType =
+          switch (analysis.suggestedStrategy()) {
+            case "DIRECTIONAL PUT SELLING" -> "PE";
+            case "DIRECTIONAL CALL SELLING" -> "CE";
+            default -> "";
+          };
+    }
     this.confirmationStreak = 0;
     this.lastDetectedSignal = ExitSignal.NONE;
     this.earlyWarningSent = false;
     logger.info(
-        "Position entry recorded for OI monitoring at price={} direction={}",
+        "Position entry recorded for OI monitoring at price={} direction={} strike={} {}",
         entryPrice,
-        entryDirection);
+        entryDirection,
+        entrySoldStrike,
+        entryStrikeType);
   }
 
   public void markPositionExited() {
@@ -628,6 +726,8 @@ public class OiAnalysisService {
     this.entrySnapshot.set(null);
     this.highestPriceSinceEntry = BigDecimal.ZERO;
     this.lowestPriceSinceEntry = BigDecimal.ZERO;
+    this.entrySoldStrike = BigDecimal.ZERO;
+    this.entryStrikeType = "";
     this.earlyWarningSent = false;
     logger.info("Position exit recorded, stopping OI monitoring");
   }
@@ -650,6 +750,8 @@ public class OiAnalysisService {
     lastExitFiredAt = Instant.MIN;
     highestPriceSinceEntry = BigDecimal.ZERO;
     lowestPriceSinceEntry = BigDecimal.ZERO;
+    entrySoldStrike = BigDecimal.ZERO;
+    entryStrikeType = "";
     earlyWarningSent = false;
     logger.info("OI Analysis Service reset");
   }
@@ -709,64 +811,39 @@ public class OiAnalysisService {
     }
 
     final DateTimeFormatter fmt = DateTimeFormatter.ofPattern("dd-MMM", Locale.ENGLISH);
-    final String nearExpiry = knownExpiryDates.getFirst().format(fmt);
-    final String farExpiry =
-        knownExpiryDates.size() > 1 ? knownExpiryDates.get(1).format(fmt) : nearExpiry;
+    final String expiry = knownExpiryDates.getFirst().format(fmt);
 
     return switch (direction) {
       case "BULLISH" -> {
-        final BigDecimal sellStrike = strikes.get(0);
-        final BigDecimal hedgeStrike = strikes.size() > 1 ? strikes.get(1) : sellStrike;
-        yield String.format(
-            "SELL %s PE (%s) | HEDGE: BUY %s PE (%s)",
-            sellStrike, nearExpiry, hedgeStrike, farExpiry);
+        final BigDecimal sellStrike = strikes.getFirst();
+        yield String.format("SELL %s PE (%s) | SL @ 2x premium collected", sellStrike, expiry);
       }
       case "BEARISH" -> {
-        final BigDecimal sellStrike = strikes.get(0);
-        final BigDecimal hedgeStrike = strikes.size() > 1 ? strikes.get(1) : sellStrike;
-        yield String.format(
-            "SELL %s CE (%s) | HEDGE: BUY %s CE (%s)",
-            sellStrike, nearExpiry, hedgeStrike, farExpiry);
+        final BigDecimal sellStrike = strikes.getFirst();
+        yield String.format("SELL %s CE (%s) | SL @ 2x premium collected", sellStrike, expiry);
       }
       case "NEUTRAL" -> {
-        if (strikes.size() < 4) {
-          yield "SELL PE & CE (" + nearExpiry + ")";
+        if (strikes.size() < 2) {
+          yield "SELL PE & CE (" + expiry + ")";
         }
         yield String.format(
-            "SELL %s PE & %s CE (%s) | HEDGE: BUY %s PE & %s CE (%s)",
-            strikes.get(0), strikes.get(2), nearExpiry, strikes.get(1), strikes.get(3), farExpiry);
+            "SELL %s PE & %s CE (%s) | SL @ 2x premium collected",
+            strikes.get(0), strikes.get(1), expiry);
       }
       default -> "";
     };
   }
 
-  private String suggestStrategy(
-      final String direction,
-      final OiDataSnapshot latest,
-      final List<BigDecimal> putSupport,
-      final List<BigDecimal> callResistance) {
-    final String base =
-        switch (direction) {
-          case "BULLISH" -> "PUT CREDIT SPREAD";
-          case "BEARISH" -> "CALL CREDIT SPREAD";
-          default -> "IRON CONDOR";
-        };
-    final BigDecimal volatilityMultiplier = computeVolatilityMultiplier();
-    final boolean isVolatile = volatilityMultiplier.compareTo(BigDecimal.valueOf(1.5)) >= 0;
-    if (isVolatile) {
-      return base + " (WIDE - high volatility)";
-    }
-    if (volatilityMultiplier.compareTo(BigDecimal.valueOf(0.8)) <= 0) {
-      return base + " (TIGHT - low volatility)";
-    }
-    return base;
+  private String suggestStrategy(final String direction) {
+    return switch (direction) {
+      case "BULLISH" -> "DIRECTIONAL PUT SELLING";
+      case "BEARISH" -> "DIRECTIONAL CALL SELLING";
+      default -> "SHORT STRANGLE";
+    };
   }
 
   private List<BigDecimal> pickStrikes(
-      final String direction,
-      final OiDataSnapshot latest,
-      final BigDecimal volatilityMultiplier,
-      final BigDecimal confidence) {
+      final String direction, final OiDataSnapshot latest, final BigDecimal confidence) {
     final List<BigDecimal> strikes = new ArrayList<>();
 
     final BigDecimal underlying = latest.underlyingValue();
@@ -774,210 +851,58 @@ public class OiAnalysisService {
       return strikes;
     }
 
-    final BigDecimal atm = roundToNearestStrike(underlying);
-    final BigDecimal spreadWidth = computeDynamicSpreadWidth(volatilityMultiplier, confidence);
-    final List<OiStrikeInfo> allBuildUp =
-        latest.topOiBuildUp() != null ? latest.topOiBuildUp() : List.of();
+    final int interval = strikeInterval();
+    final BigDecimal atm = roundToNearestStrike(underlying, interval);
+    final int sellOffset = confidence.compareTo(BigDecimal.valueOf(70)) >= 0 ? 2 : 3;
 
     switch (direction) {
       case "BULLISH" -> {
-        final BigDecimal sellStrike = bestOiStrike(allBuildUp, "PE", atm, true, spreadWidth);
-        if (sellStrike == null) {
-          return strikes;
-        }
-        final BigDecimal hedgeStrike =
-            bestHedgeStrike(allBuildUp, "PE", sellStrike, true, spreadWidth);
+        final BigDecimal support = findMaxOiSupport(latest);
+        final BigDecimal sellStrike =
+            support != null
+                ? support.subtract(BigDecimal.valueOf(interval))
+                : atm.subtract(BigDecimal.valueOf((long) sellOffset * interval));
         strikes.add(sellStrike);
-        strikes.add(hedgeStrike);
       }
       case "BEARISH" -> {
-        final BigDecimal sellStrike = bestOiStrike(allBuildUp, "CE", atm, false, spreadWidth);
-        if (sellStrike == null) {
-          return strikes;
-        }
-        final BigDecimal hedgeStrike =
-            bestHedgeStrike(allBuildUp, "CE", sellStrike, false, spreadWidth);
+        final BigDecimal resistance = findMaxOiResistance(latest);
+        final BigDecimal sellStrike =
+            resistance != null
+                ? resistance.add(BigDecimal.valueOf(interval))
+                : atm.add(BigDecimal.valueOf((long) sellOffset * interval));
         strikes.add(sellStrike);
-        strikes.add(hedgeStrike);
       }
       default -> {
-        final BigDecimal putStrike = bestOiStrike(allBuildUp, "PE", atm, true, spreadWidth);
-        final BigDecimal callStrike = bestOiStrike(allBuildUp, "CE", atm, false, spreadWidth);
-        if (putStrike == null || callStrike == null) {
-          return strikes;
-        }
-        final BigDecimal putHedge = bestHedgeStrike(allBuildUp, "PE", putStrike, true, spreadWidth);
-        final BigDecimal callHedge =
-            bestHedgeStrike(allBuildUp, "CE", callStrike, false, spreadWidth);
+        final BigDecimal putStrike = atm.subtract(BigDecimal.valueOf(3L * interval));
+        final BigDecimal callStrike = atm.add(BigDecimal.valueOf(3L * interval));
         strikes.add(putStrike);
-        strikes.add(putHedge);
         strikes.add(callStrike);
-        strikes.add(callHedge);
       }
     }
 
     return strikes;
   }
 
-  private BigDecimal computeDynamicSpreadWidth(
-      final BigDecimal volatilityMultiplier, final BigDecimal confidence) {
-    final BigDecimal baseWidth = BigDecimal.valueOf(STRIKE_INTERVAL);
-    final BigDecimal volAdjusted = baseWidth.multiply(volatilityMultiplier);
-    final BigDecimal confidenceFactor =
-        confidence.compareTo(HIGH_CONFIDENCE_THRESHOLD) >= 0
-            ? BigDecimal.valueOf(0.8)
-            : BigDecimal.ONE;
-    final BigDecimal rawWidth = volAdjusted.multiply(confidenceFactor);
-    final BigDecimal minWidth = BigDecimal.valueOf(STRIKE_INTERVAL);
-    final BigDecimal maxWidth = BigDecimal.valueOf(3L * STRIKE_INTERVAL);
-    return rawWidth.min(maxWidth).max(minWidth);
-  }
-
-  private BigDecimal computeVolatilityMultiplier() {
-    if (snapshots.size() < VOLATILITY_WINDOW + 1) {
-      return BigDecimal.ONE;
-    }
-    BigDecimal sumAbsMove = BigDecimal.ZERO;
-    final int end = snapshots.size();
-    final int start = end - VOLATILITY_WINDOW;
-    for (int i = start; i < end; i++) {
-      sumAbsMove =
-          sumAbsMove.add(
-              snapshots
-                  .get(i)
-                  .underlyingValue()
-                  .subtract(snapshots.get(i - 1).underlyingValue())
-                  .abs());
-    }
-    final BigDecimal avgMove =
-        sumAbsMove.divide(BigDecimal.valueOf(VOLATILITY_WINDOW), 2, RoundingMode.HALF_UP);
-    final BigDecimal normalMove = BigDecimal.valueOf(100);
-    final BigDecimal rawMultiplier = avgMove.divide(normalMove, 2, RoundingMode.HALF_UP);
-    return rawMultiplier
-        .multiply(BASE_SPREAD_MULTIPLIER)
-        .max(BigDecimal.valueOf(0.6))
-        .min(MAX_SPREAD_MULTIPLIER);
-  }
-
-  private BigDecimal bestOiStrike(
-      final List<OiStrikeInfo> allBuildUp,
-      final String optionType,
-      final BigDecimal atm,
-      final boolean belowAtm,
-      final BigDecimal spreadWidth) {
-    final List<OiStrikeInfo> filtered =
-        allBuildUp.stream()
-            .filter(s -> optionType.equals(s.optionType()))
-            .filter(
-                s ->
-                    belowAtm
-                        ? s.strikePrice().compareTo(atm) < 0
-                            && !isOiOutlier(s, allBuildUp, optionType)
-                        : s.strikePrice().compareTo(atm) > 0
-                            && !isOiOutlier(s, allBuildUp, optionType))
-            .filter(
-                s -> {
-                  final BigDecimal distance = s.strikePrice().subtract(atm).abs();
-                  return distance.compareTo(spreadWidth.multiply(BigDecimal.valueOf(2))) <= 0;
-                })
-            .toList();
-
-    if (filtered.isEmpty()) {
-      return computeFallbackStrike(atm, belowAtm, spreadWidth);
-    }
-
-    return filtered.stream()
-        .max(
-            Comparator.comparing(
-                s ->
-                    s.changeInOi()
-                        .multiply(BigDecimal.valueOf(100))
-                        .divide(
-                            s.strikePrice()
-                                .subtract(atm)
-                                .abs()
-                                .max(BigDecimal.valueOf(STRIKE_INTERVAL)),
-                            2,
-                            RoundingMode.HALF_UP)
-                        .multiply(
-                            BigDecimal.ONE.add(
-                                s.pchangeInOi()
-                                    .abs()
-                                    .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP)))))
-        .map(OiStrikeInfo::strikePrice)
-        .orElse(computeFallbackStrike(atm, belowAtm, spreadWidth));
-  }
-
-  private BigDecimal bestHedgeStrike(
-      final List<OiStrikeInfo> allBuildUp,
-      final String optionType,
-      final BigDecimal sellStrike,
-      final boolean belowSellStrike,
-      final BigDecimal spreadWidth) {
-    final List<BigDecimal> candidateStrikes =
-        allBuildUp.stream()
-            .filter(s -> optionType.equals(s.optionType()))
-            .filter(
-                s ->
-                    belowSellStrike
-                        ? s.strikePrice().compareTo(sellStrike) < 0
-                        : s.strikePrice().compareTo(sellStrike) > 0)
-            .map(OiStrikeInfo::strikePrice)
-            .distinct()
-            .sorted(belowSellStrike ? Comparator.reverseOrder() : Comparator.naturalOrder())
-            .limit(MAX_HEDGE_STRIKES)
-            .toList();
-
-    if (!candidateStrikes.isEmpty()) {
-      return candidateStrikes.getFirst();
-    }
-
-    return belowSellStrike ? sellStrike.subtract(spreadWidth) : sellStrike.add(spreadWidth);
-  }
-
-  private boolean isOiOutlier(
-      final OiStrikeInfo candidate, final List<OiStrikeInfo> allBuildUp, final String optionType) {
-    final List<BigDecimal> changes =
-        allBuildUp.stream()
-            .filter(s -> optionType.equals(s.optionType()))
-            .map(OiStrikeInfo::changeInOi)
-            .toList();
-    if (changes.size() < 3) {
-      return false;
-    }
-    final BigDecimal mean =
-        changes.stream()
-            .reduce(BigDecimal.ZERO, BigDecimal::add)
-            .divide(BigDecimal.valueOf(changes.size()), 2, RoundingMode.HALF_UP);
-    final BigDecimal variance =
-        changes.stream()
-            .map(c -> c.subtract(mean).pow(2))
-            .reduce(BigDecimal.ZERO, BigDecimal::add)
-            .divide(BigDecimal.valueOf(changes.size()), 2, RoundingMode.HALF_UP);
-    final BigDecimal stdDev = BigDecimal.valueOf(Math.sqrt(variance.doubleValue()));
-    if (stdDev.compareTo(BigDecimal.ZERO) == 0) {
-      return false;
-    }
-    final BigDecimal zScore =
-        candidate.changeInOi().subtract(mean).abs().divide(stdDev, 2, RoundingMode.HALF_UP);
-    return zScore.compareTo(OI_CHANGE_Z_SCORE_THRESHOLD) > 0;
-  }
-
-  private BigDecimal computeFallbackStrike(
-      final BigDecimal atm, final boolean belowAtm, final BigDecimal spreadWidth) {
-    final BigDecimal offset = spreadWidth.max(BigDecimal.valueOf(2L * STRIKE_INTERVAL));
-    return belowAtm ? atm.subtract(offset) : atm.add(offset);
-  }
-
-  private List<BigDecimal> topBuildUpStrikes(
-      final OiDataSnapshot snapshot, final String optionType) {
+  private BigDecimal findMaxOiSupport(final OiDataSnapshot snapshot) {
     if (snapshot.topOiBuildUp() == null) {
-      return List.of();
+      return null;
     }
     return snapshot.topOiBuildUp().stream()
-        .filter(s -> optionType.equals(s.optionType()))
+        .filter(s -> "PE".equals(s.optionType()))
+        .max(Comparator.comparing(OiStrikeInfo::openInterest))
         .map(OiStrikeInfo::strikePrice)
-        .toList();
+        .orElse(null);
+  }
+
+  private BigDecimal findMaxOiResistance(final OiDataSnapshot snapshot) {
+    if (snapshot.topOiBuildUp() == null) {
+      return null;
+    }
+    return snapshot.topOiBuildUp().stream()
+        .filter(s -> "CE".equals(s.optionType()))
+        .max(Comparator.comparing(OiStrikeInfo::openInterest))
+        .map(OiStrikeInfo::strikePrice)
+        .orElse(null);
   }
 
   private String computeDirection(final OiDataSnapshot snapshot) {
@@ -1016,10 +941,25 @@ public class OiAnalysisService {
     return String.valueOf(longVal);
   }
 
-  private BigDecimal roundToNearestStrike(final BigDecimal price) {
-    final BigDecimal divided =
-        price.divide(BigDecimal.valueOf(STRIKE_INTERVAL), 0, RoundingMode.HALF_UP);
-    return divided.multiply(BigDecimal.valueOf(STRIKE_INTERVAL));
+  private BigDecimal fetchVix() {
+    final IndexQuote quote = optionChainClient.fetchIndexQuote("VIX");
+    if (quote != null && quote.data() != null && !quote.data().isEmpty()) {
+      return quote.data().getFirst().lastPrice();
+    }
+    return null;
+  }
+
+  private BigDecimal fetchIndexOpen() {
+    final IndexQuote quote = optionChainClient.fetchIndexQuote(currentIndex);
+    if (quote != null && quote.data() != null && !quote.data().isEmpty()) {
+      return quote.data().getFirst().open();
+    }
+    return null;
+  }
+
+  private BigDecimal roundToNearestStrike(final BigDecimal price, final int interval) {
+    final BigDecimal divided = price.divide(BigDecimal.valueOf(interval), 0, RoundingMode.HALF_UP);
+    return divided.multiply(BigDecimal.valueOf(interval));
   }
 
   private record CandleData(BigDecimal high, BigDecimal low) {}
@@ -1031,7 +971,9 @@ public class OiAnalysisService {
     SUPERTREND_REVERSAL,
     OI_SURGE,
     HARD_STOP,
-    TRAILING_STOP
+    TRAILING_STOP,
+    STRIKE_BREACH,
+    PROFIT_TARGET
   }
 
   public record ExitAssessment(ExitSignal signal, BigDecimal confidence, BigDecimal exitFraction) {
@@ -1142,6 +1084,28 @@ public class OiAnalysisService {
           entryPrice,
           entryDirection);
       return new ExitAssessment(ExitSignal.HARD_STOP, BigDecimal.valueOf(95), BigDecimal.ONE);
+    }
+
+    final ExitSignal breachSignal = checkStrikeBreach(currentPrice);
+    if (breachSignal != ExitSignal.NONE) {
+      logger.warn(
+          "{} triggered at price={} (sold strike={}, direction={})",
+          breachSignal,
+          currentPrice,
+          entrySoldStrike,
+          entryDirection);
+      return new ExitAssessment(breachSignal, BigDecimal.valueOf(90), BigDecimal.ONE);
+    }
+
+    final ExitSignal profitSignal = checkProfitTarget(currentPrice);
+    if (profitSignal != ExitSignal.NONE) {
+      logger.info(
+          "{} triggered at price={} (entry={}, direction={})",
+          profitSignal,
+          currentPrice,
+          entryPrice,
+          entryDirection);
+      return new ExitAssessment(profitSignal, BigDecimal.valueOf(80), BigDecimal.ONE);
     }
 
     if (isInCooldown()) {
@@ -1309,6 +1273,49 @@ public class OiAnalysisService {
     return BigDecimal.ZERO;
   }
 
+  private ExitSignal checkStrikeBreach(final BigDecimal currentPrice) {
+    if (entrySoldStrike == null
+        || entrySoldStrike.compareTo(BigDecimal.ZERO) == 0
+        || entryStrikeType.isEmpty()
+        || currentPrice == null) {
+      return ExitSignal.NONE;
+    }
+    if ("PE".equals(entryStrikeType)) {
+      // Sold PUT expecting bullish move; breach if price drops below strike
+      if (currentPrice.compareTo(entrySoldStrike) <= 0) {
+        return ExitSignal.STRIKE_BREACH;
+      }
+    } else if ("CE".equals(entryStrikeType)) {
+      // Sold CALL expecting bearish move; breach if price rises above strike
+      if (currentPrice.compareTo(entrySoldStrike) >= 0) {
+        return ExitSignal.STRIKE_BREACH;
+      }
+    }
+    return ExitSignal.NONE;
+  }
+
+  private ExitSignal checkProfitTarget(final BigDecimal currentPrice) {
+    if (entryPrice == null || entryPrice.compareTo(BigDecimal.ZERO) == 0 || currentPrice == null) {
+      return ExitSignal.NONE;
+    }
+    final BigDecimal favorableMovePct =
+        "BULLISH".equals(entryDirection)
+            ? currentPrice
+                .subtract(entryPrice)
+                .multiply(BigDecimal.valueOf(100))
+                .divide(entryPrice, 2, RoundingMode.HALF_UP)
+            : "BEARISH".equals(entryDirection)
+                ? entryPrice
+                    .subtract(currentPrice)
+                    .multiply(BigDecimal.valueOf(100))
+                    .divide(entryPrice, 2, RoundingMode.HALF_UP)
+                : BigDecimal.ZERO;
+    if (favorableMovePct.compareTo(BigDecimal.valueOf(0.5)) >= 0) {
+      return ExitSignal.PROFIT_TARGET;
+    }
+    return ExitSignal.NONE;
+  }
+
   private boolean isPastAfternoonThreshold() {
     return !LocalTime.now(IST).isBefore(AFTERNOON_THRESHOLD);
   }
@@ -1320,20 +1327,23 @@ public class OiAnalysisService {
     final String message =
         switch (signal) {
           case PCR_SHIFT ->
-              "\u26A0\uFE0F EARLY WARNING: PCR shift detected (pending confirmation). Monitor closely.";
+              "\u26A0\uFE0F EARLY WARNING: PCR shift – sold option may be at risk. Monitor closely.";
           case DIRECTION_REVERSAL ->
-              "\u26A0\uFE0F EARLY WARNING: Direction reversal detected (pending confirmation). Monitor closely.";
+              "\u26A0\uFE0F EARLY WARNING: Direction reversal – sold option OTM status threatened. Monitor closely.";
           case SUPERTREND_REVERSAL ->
-              "\u26A0\uFE0F EARLY WARNING: SuperTrend reversal detected (pending confirmation). Monitor closely.";
+              "\u26A0\uFE0F EARLY WARNING: SuperTrend reversal – consider partial exit. Monitor closely.";
           case OI_SURGE ->
-              "\u26A0\uFE0F EARLY WARNING: OI volume surge detected (pending confirmation). Monitor closely.";
+              "\u26A0\uFE0F EARLY WARNING: OI surge – increased volatility expected. Monitor closely.";
+          case STRIKE_BREACH ->
+              "\u26A0\uFE0F EARLY WARNING: Underlying approaching sold strike. Consider exiting.";
           default -> "";
         };
     if (!message.isBlank()) {
       final BigDecimal lossPct = estimateUnrealizedLossPct(currentPrice);
       final String lossInfo =
           lossPct.compareTo(BigDecimal.ZERO) > 0 ? "\nEstimated loss: " + lossPct + "%" : "";
-      telegramService.sendMessage(message + lossInfo + "\nCurrent Nifty: " + currentPrice);
+      telegramService.sendMessage(
+          message + lossInfo + "\nCurrent " + indexLabel() + ": " + currentPrice);
       earlyWarningSent = true;
       logger.info("Early warning sent for signal: {}", signal);
     }

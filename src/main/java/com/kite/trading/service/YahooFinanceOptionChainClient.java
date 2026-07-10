@@ -27,10 +27,13 @@ public class YahooFinanceOptionChainClient implements OptionChainClient {
 
   private static final Logger logger = LoggerFactory.getLogger(YahooFinanceOptionChainClient.class);
 
-  private static final String YAHOO_OPTION_URL =
-      "https://query1.finance.yahoo.com/v7/finance/options/%5ENSEI";
+  private static final String YAHOO_OPTION_URL_TEMPLATE =
+      "https://query1.finance.yahoo.com/v7/finance/options/%s";
   private static final DateTimeFormatter NSE_DATE_FMT =
       DateTimeFormatter.ofPattern("dd-MMM-yyyy", Locale.ENGLISH);
+
+  private static final Map<String, String> SYMBOL_TO_TICKER =
+      Map.of("NIFTY", "^NSEI", "SENSEX", "^BSESN", "BANKNIFTY", "^NSEBANK");
 
   private final WebClient webClient;
 
@@ -42,11 +45,17 @@ public class YahooFinanceOptionChainClient implements OptionChainClient {
 
   @Override
   public OptionChainData fetchOptionChain() {
+    return fetchOptionChain("NIFTY");
+  }
+
+  public OptionChainData fetchOptionChain(final String symbol) {
+    final String ticker = SYMBOL_TO_TICKER.getOrDefault(symbol, "^NSEI");
+    final String url = String.format(YAHOO_OPTION_URL_TEMPLATE, ticker);
     try {
       final YahooResponse response =
           webClient
               .get()
-              .uri(YAHOO_OPTION_URL)
+              .uri(url)
               .header("User-Agent", "Mozilla/5.0")
               .retrieve()
               .bodyToMono(YahooResponse.class)
@@ -56,13 +65,15 @@ public class YahooFinanceOptionChainClient implements OptionChainClient {
           || response.optionChain() == null
           || response.optionChain().result() == null
           || response.optionChain().result().isEmpty()) {
-        logger.warn("Yahoo Finance returned empty response");
+        logger.warn(
+            "Yahoo Finance returned empty response for symbol {} (ticker {})", symbol, ticker);
         return null;
       }
 
       return convert(response.optionChain().result().getFirst());
     } catch (final Exception e) {
-      logger.error("Failed to fetch option chain from Yahoo Finance", e);
+      logger.error(
+          "Failed to fetch option chain from Yahoo Finance for {}: {}", symbol, e.getMessage());
       return null;
     }
   }

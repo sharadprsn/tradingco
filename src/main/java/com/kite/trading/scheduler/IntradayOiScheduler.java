@@ -81,17 +81,22 @@ public class IntradayOiScheduler {
   public void marketCloseSummary() {
     final var snapshots = oiAnalysisService.getSnapshots();
     if (!snapshots.isEmpty()) {
+      final String indexLabel = oiAnalysisService.getCurrentIndexLabel();
       final var first = findClosestTo(snapshots, LocalTime.of(9, 45));
       final var last = snapshots.getLast();
-      final BigDecimal nifty945 = first != null ? first.underlyingValue() : null;
-      final BigDecimal nifty1530 = last.underlyingValue();
+      final BigDecimal val945 = first != null ? first.underlyingValue() : null;
+      final BigDecimal val1530 = last.underlyingValue();
       final String movement =
-          (nifty945 != null) ? String.format("%+.2f", nifty1530.subtract(nifty945)) : "N/A";
+          (val945 != null) ? String.format("%+.2f", val1530.subtract(val945)) : "N/A";
       final String summary =
-          "9:45 AM Nifty: "
-              + (nifty945 != null ? nifty945 : "N/A")
-              + "\n3:30 PM Nifty: "
-              + nifty1530
+          "9:45 AM "
+              + indexLabel
+              + ": "
+              + (val945 != null ? val945 : "N/A")
+              + "\n3:30 PM "
+              + indexLabel
+              + ": "
+              + val1530
               + "\nMovement: "
               + movement;
       telegramService.sendMessage(summary);
