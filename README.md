@@ -215,7 +215,8 @@ NSE API ──► NseOptionChainClient ──► OiAnalysisService ──► Tel
 docker compose up --build
 
 # Build image manually
-docker build -t kite-trading:latest .
+docker build -t sharadprsn/kite-trading:latest .
+docker build -t sharadprsn/ml-sidecar:latest ./ml-sidecar
 
 # Tag for your registry
 docker tag kite-trading:latest sharadprsn/kite-trading:latest
