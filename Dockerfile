@@ -31,8 +31,8 @@ RUN addgroup -S spring && adduser -S spring -G spring && apk add --no-cache su-e
 COPY --from=build /app/build/libs/kite-trading-1.0.0.jar app.jar
 COPY keystore.p12 keystore.p12
 
-# Create logs directory
-RUN mkdir -p /app/logs && chown spring:spring app.jar keystore.p12
+# Create logs and data directories
+RUN mkdir -p /app/logs /app/data && chown spring:spring app.jar keystore.p12
 
 # Expose port
 EXPOSE 443
@@ -41,5 +41,5 @@ EXPOSE 443
 HEALTHCHECK --interval=30s --timeout=3s --start-period=30s --retries=3 \
   CMD wget -q --spider http://localhost:443/actuator/health || exit 1
 
-# Ensure logs directory is writable, then run as spring user
-ENTRYPOINT ["/bin/sh", "-c", "mkdir -p /app/logs && chmod 777 /app/logs && exec su-exec spring java -jar app.jar"]
+# Ensure logs and data directories are writable, then run as spring user
+ENTRYPOINT ["/bin/sh", "-c", "mkdir -p /app/logs /app/data && chmod 777 /app/logs /app/data && exec su-exec spring java -jar app.jar"]

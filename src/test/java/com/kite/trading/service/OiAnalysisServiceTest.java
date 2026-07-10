@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.*;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kite.trading.dto.IndexQuote;
 import com.kite.trading.dto.OiAnalysisResult;
 import com.kite.trading.dto.OiDataSnapshot;
@@ -11,6 +12,7 @@ import com.kite.trading.dto.OptionChainData;
 import com.kite.trading.dto.OptionChainData.OptionContract;
 import com.kite.trading.dto.OptionChainData.OptionData;
 import com.kite.trading.dto.OptionChainData.Records;
+import com.kite.trading.repository.OiSnapshotRepository;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.DayOfWeek;
@@ -31,13 +33,21 @@ class OiAnalysisServiceTest {
 
   @Mock private TelegramService telegramService;
 
+  @Mock private OiSnapshotRepository snapshotRepository;
+
+  @Mock private LstmPredictionClient lstmClient;
+
+  private final ObjectMapper objectMapper = new ObjectMapper();
+
   private OiAnalysisService service;
 
   @BeforeEach
   void setUp() {
     final Clock morningClock =
         Clock.fixed(Instant.parse("2026-07-16T04:30:00Z"), ZoneId.of("Asia/Kolkata"));
-    service = new OiAnalysisService(nseClient, telegramService, morningClock);
+    service =
+        new OiAnalysisService(
+            nseClient, telegramService, snapshotRepository, objectMapper, lstmClient, morningClock);
   }
 
   @Test
@@ -574,7 +584,8 @@ class OiAnalysisServiceTest {
     final Clock fixedClock =
         Clock.fixed(Instant.parse("2026-07-16T09:45:00Z"), ZoneId.of("Asia/Kolkata"));
     final OiAnalysisService serviceWithFixedClock =
-        new OiAnalysisService(nseClient, telegramService, fixedClock);
+        new OiAnalysisService(
+            nseClient, telegramService, snapshotRepository, objectMapper, lstmClient, fixedClock);
 
     final var peSellContract =
         contractWithPremium(

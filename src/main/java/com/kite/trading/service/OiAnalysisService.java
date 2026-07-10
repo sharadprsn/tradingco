@@ -1,12 +1,17 @@
 package com.kite.trading.service;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kite.trading.dto.IndexQuote;
 import com.kite.trading.dto.IndexQuote.IndexData;
+import com.kite.trading.dto.LstmPredictionResponse;
 import com.kite.trading.dto.OiAnalysisResult;
 import com.kite.trading.dto.OiDataSnapshot;
 import com.kite.trading.dto.OiDataSnapshot.OiStrikeInfo;
 import com.kite.trading.dto.OptionChainData;
 import com.kite.trading.dto.OptionChainData.OptionData;
+import com.kite.trading.entity.OiSnapshotEntity;
+import com.kite.trading.repository.OiSnapshotRepository;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Clock;
@@ -81,6 +86,9 @@ public class OiAnalysisService {
 
   private final OptionChainClient optionChainClient;
   private final TelegramService telegramService;
+  private final OiSnapshotRepository snapshotRepository;
+  private final ObjectMapper objectMapper;
+  private final LstmPredictionClient lstmClient;
   private final Clock clock;
 
   private final List<OiDataSnapshot> snapshots = new CopyOnWriteArrayList<>();
@@ -142,16 +150,32 @@ public class OiAnalysisService {
 
   @Autowired
   public OiAnalysisService(
-      final OptionChainClient optionChainClient, final TelegramService telegramService) {
-    this(optionChainClient, telegramService, Clock.system(IST));
+      final OptionChainClient optionChainClient,
+      final TelegramService telegramService,
+      final OiSnapshotRepository snapshotRepository,
+      final ObjectMapper objectMapper,
+      final LstmPredictionClient lstmClient) {
+    this(
+        optionChainClient,
+        telegramService,
+        snapshotRepository,
+        objectMapper,
+        lstmClient,
+        Clock.system(IST));
   }
 
   public OiAnalysisService(
       final OptionChainClient optionChainClient,
       final TelegramService telegramService,
+      final OiSnapshotRepository snapshotRepository,
+      final ObjectMapper objectMapper,
+      final LstmPredictionClient lstmClient,
       final Clock clock) {
     this.optionChainClient = optionChainClient;
     this.telegramService = telegramService;
+    this.snapshotRepository = snapshotRepository;
+    this.objectMapper = objectMapper;
+    this.lstmClient = lstmClient;
     this.clock = clock;
   }
 
@@ -312,7 +336,50 @@ public class OiAnalysisService {
 
     recordCandleData();
 
+    persistSnapshot(snapshot);
+
     return snapshot;
+  }
+
+  private void persistSnapshot(final OiDataSnapshot snapshot) {
+    try {
+      final BigDecimal vix = fetchVix();
+      final IndexQuote quote = optionChainClient.fetchIndexQuote(currentIndex);
+      final BigDecimal indexOpen =
+          (quote != null && quote.data() != null && !quote.data().isEmpty())
+              ? quote.data().getFirst().open()
+              : null;
+      final BigDecimal indexHigh =
+          (quote != null && quote.data() != null && !quote.data().isEmpty())
+              ? quote.data().getFirst().high()
+              : null;
+      final BigDecimal indexLow =
+          (quote != null && quote.data() != null && !quote.data().isEmpty())
+              ? quote.data().getFirst().low()
+              : null;
+
+      final String topOiBuildUpJson = objectMapper.writeValueAsString(snapshot.topOiBuildUp());
+      final String strikePremiumsJson = objectMapper.writeValueAsString(snapshot.strikePremiums());
+
+      final OiSnapshotEntity entity =
+          OiSnapshotEntity.fromSnapshot(
+              snapshot,
+              currentIndex,
+              vix,
+              indexOpen,
+              indexHigh,
+              indexLow,
+              topOiBuildUpJson,
+              strikePremiumsJson);
+
+      snapshotRepository.save(entity);
+      logger.debug(
+          "OI snapshot persisted to H2: id={}, timestamp={}", entity.getId(), snapshot.timestamp());
+    } catch (final JsonProcessingException e) {
+      logger.error("Failed to serialize snapshot JSON for H2 persistence", e);
+    } catch (final Exception e) {
+      logger.error("Failed to persist snapshot to H2", e);
+    }
   }
 
   private void recordCandleData() {
@@ -408,6 +475,34 @@ public class OiAnalysisService {
       strategy = "NO_TRADE";
       finalDirection = "NEUTRAL";
       finalConfidence = BigDecimal.ZERO;
+    }
+
+    if (lstmClient.isEnabled() && !"NO_TRADE".equals(strategy)) {
+      final LstmPredictionResponse lstmResult = lstmClient.predict(snapshots);
+      if (lstmResult != null) {
+        final BigDecimal lstmConfidence = BigDecimal.valueOf(lstmResult.confidence() * 100);
+        if (lstmConfidence.compareTo(finalConfidence) > 0) {
+          reasoning
+              .append("LSTM overrides (")
+              .append(lstmResult.direction())
+              .append(", ")
+              .append(lstmConfidence.setScale(1, RoundingMode.HALF_UP))
+              .append("%). ");
+          finalDirection = lstmResult.direction();
+          finalConfidence = lstmConfidence;
+        } else {
+          reasoning
+              .append("Rules prevail (")
+              .append(finalDirection)
+              .append(", ")
+              .append(finalConfidence.setScale(1, RoundingMode.HALF_UP))
+              .append("%) over LSTM (")
+              .append(lstmResult.direction())
+              .append(", ")
+              .append(lstmConfidence.setScale(1, RoundingMode.HALF_UP))
+              .append("%). ");
+        }
+      }
     }
 
     final BigDecimal vix = fetchVix();

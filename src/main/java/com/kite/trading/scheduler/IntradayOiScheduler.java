@@ -1,6 +1,8 @@
 package com.kite.trading.scheduler;
 
+import com.kite.trading.dto.LstmTrainResponse;
 import com.kite.trading.dto.OiDataSnapshot;
+import com.kite.trading.service.LstmPredictionClient;
 import com.kite.trading.service.OiAnalysisService;
 import com.kite.trading.service.TelegramService;
 import java.math.BigDecimal;
@@ -26,6 +28,7 @@ public class IntradayOiScheduler {
 
   private final OiAnalysisService oiAnalysisService;
   private final TelegramService telegramService;
+  private final LstmPredictionClient lstmClient;
 
   private volatile boolean prediction945Executed;
   private volatile boolean autoEntryExecutedToday;
@@ -33,9 +36,12 @@ public class IntradayOiScheduler {
   private static final LocalTime AUTO_ENTRY_TIME = LocalTime.of(9, 50);
 
   public IntradayOiScheduler(
-      final OiAnalysisService oiAnalysisService, final TelegramService telegramService) {
+      final OiAnalysisService oiAnalysisService,
+      final TelegramService telegramService,
+      final LstmPredictionClient lstmClient) {
     this.oiAnalysisService = oiAnalysisService;
     this.telegramService = telegramService;
+    this.lstmClient = lstmClient;
   }
 
   @Scheduled(fixedRate = SIX_MINUTES_MS, initialDelay = 5_000)
@@ -112,6 +118,18 @@ public class IntradayOiScheduler {
               + movement;
       telegramService.sendMessage(summary);
     }
+
+    final LstmTrainResponse trainResult = lstmClient.triggerTraining();
+    if (trainResult != null && "success".equals(trainResult.status())) {
+      telegramService.sendMessage(
+          "LSTM model retrained: accuracy="
+              + String.format("%.1f", trainResult.valAccuracy() * 100)
+              + "%, samples="
+              + trainResult.samples());
+    } else if (trainResult != null && "skipped".equals(trainResult.status())) {
+      logger.info("LSTM training skipped: {}", trainResult.reason());
+    }
+
     oiAnalysisService.reset();
     prediction945Executed = false;
     autoEntryExecutedToday = false;

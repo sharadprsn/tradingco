@@ -2,6 +2,7 @@ package com.kite.trading.scheduler;
 
 import static org.mockito.Mockito.*;
 
+import com.kite.trading.service.LstmPredictionClient;
 import com.kite.trading.service.OiAnalysisService;
 import com.kite.trading.service.TelegramService;
 import org.junit.jupiter.api.BeforeEach;
@@ -17,11 +18,13 @@ class IntradayOiSchedulerTest {
 
   @Mock private TelegramService telegramService;
 
+  @Mock private LstmPredictionClient lstmClient;
+
   private IntradayOiScheduler scheduler;
 
   @BeforeEach
   void setUp() {
-    scheduler = new IntradayOiScheduler(oiAnalysisService, telegramService);
+    scheduler = new IntradayOiScheduler(oiAnalysisService, telegramService, lstmClient);
   }
 
   @Test

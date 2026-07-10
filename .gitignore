@@ -48,3 +48,7 @@ keystore.p12
 
 # Docker
 docker-compose.override.yml
+
+# Runtime data
+/data/
+/logs/
