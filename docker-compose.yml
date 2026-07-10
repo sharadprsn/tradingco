@@ -30,7 +30,7 @@ services:
       start_period: 30s
 
   ml-sidecar:
-    build: ./ml-sidecar
+    image: sharadprsn/ml-sidecar:latest
     container_name: ml-sidecar
     ports:
       - "8000:8000"
@@ -41,8 +41,8 @@ services:
       - ./data:/app/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 60s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
