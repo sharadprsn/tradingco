@@ -382,6 +382,162 @@ class OiAnalysisServiceTest {
     assertEquals("NIFTY", OiAnalysisService.resolveIndexForDay(DayOfWeek.SUNDAY));
   }
 
+  @Test
+  void notifyExitIfNeeded_triggersHardStop_onPremiumDoubling() {
+    // Entry Snapshot 1
+    final var peSellContract1 =
+        contractWithPremium(
+            BigDecimal.valueOf(5000), BigDecimal.valueOf(100), BigDecimal.valueOf(35));
+    final var peHedgeContract1 =
+        contractWithPremium(
+            BigDecimal.valueOf(3000), BigDecimal.valueOf(50), BigDecimal.valueOf(10));
+    final var option1_1 = new OptionData(BigDecimal.valueOf(24200), null, null, peSellContract1);
+    final var option1_2 = new OptionData(BigDecimal.valueOf(24050), null, null, peHedgeContract1);
+    final var entryChain1 =
+        new OptionChainData(
+            new Records(
+                List.of("16-Jul-2026"),
+                List.of(option1_1, option1_2),
+                null,
+                BigDecimal.valueOf(24250),
+                null),
+            null);
+
+    // Entry Snapshot 2 (adds OI buildup to dominate, so it is BULLISH)
+    final var peSellContract2 =
+        contractWithPremium(
+            BigDecimal.valueOf(5500), BigDecimal.valueOf(100), BigDecimal.valueOf(35));
+    final var peHedgeContract2 =
+        contractWithPremium(
+            BigDecimal.valueOf(3100), BigDecimal.valueOf(50), BigDecimal.valueOf(10));
+    final var option2_1 = new OptionData(BigDecimal.valueOf(24200), null, null, peSellContract2);
+    final var option2_2 = new OptionData(BigDecimal.valueOf(24050), null, null, peHedgeContract2);
+    final var entryChain2 =
+        new OptionChainData(
+            new Records(
+                List.of("16-Jul-2026"),
+                List.of(option2_1, option2_2),
+                null,
+                BigDecimal.valueOf(24250),
+                null),
+            null);
+
+    // Exit Snapshot (premium doubles to 80)
+    final var peSellExitContract =
+        contractWithPremium(
+            BigDecimal.valueOf(5500), BigDecimal.valueOf(100), BigDecimal.valueOf(80));
+    final var peHedgeExitContract =
+        contractWithPremium(
+            BigDecimal.valueOf(3100), BigDecimal.valueOf(50), BigDecimal.valueOf(10));
+    final var exitOption1 =
+        new OptionData(BigDecimal.valueOf(24200), null, null, peSellExitContract);
+    final var exitOption2 =
+        new OptionData(BigDecimal.valueOf(24050), null, null, peHedgeExitContract);
+    final var exitChain =
+        new OptionChainData(
+            new Records(
+                List.of("16-Jul-2026"),
+                List.of(exitOption1, exitOption2),
+                null,
+                BigDecimal.valueOf(24100),
+                null),
+            null);
+
+    when(nseClient.fetchOptionChain(anyString()))
+        .thenReturn(entryChain1)
+        .thenReturn(entryChain2)
+        .thenReturn(exitChain);
+
+    service.fetchAndRecordOi(); // snap 1
+    service.fetchAndRecordOi(); // snap 2
+    service.analyzeAndPredict(); // BULLISH, suggested strikes [24200]
+    service.markPositionEntered();
+
+    service.fetchAndRecordOi(); // exit snap
+    service.notifyExitIfNeeded();
+
+    verify(telegramService, atLeastOnce()).sendMessage(argThat(msg -> msg.contains("HARD STOP")));
+  }
+
+  @Test
+  void notifyExitIfNeeded_triggersProfitTarget_onPremiumDecay() {
+    // Entry Snapshot 1
+    final var peSellContract1 =
+        contractWithPremium(
+            BigDecimal.valueOf(5000), BigDecimal.valueOf(100), BigDecimal.valueOf(35));
+    final var peHedgeContract1 =
+        contractWithPremium(
+            BigDecimal.valueOf(3000), BigDecimal.valueOf(50), BigDecimal.valueOf(10));
+    final var option1_1 = new OptionData(BigDecimal.valueOf(24200), null, null, peSellContract1);
+    final var option1_2 = new OptionData(BigDecimal.valueOf(24050), null, null, peHedgeContract1);
+    final var entryChain1 =
+        new OptionChainData(
+            new Records(
+                List.of("16-Jul-2026"),
+                List.of(option1_1, option1_2),
+                null,
+                BigDecimal.valueOf(24250),
+                null),
+            null);
+
+    // Entry Snapshot 2
+    final var peSellContract2 =
+        contractWithPremium(
+            BigDecimal.valueOf(5500), BigDecimal.valueOf(100), BigDecimal.valueOf(35));
+    final var peHedgeContract2 =
+        contractWithPremium(
+            BigDecimal.valueOf(3100), BigDecimal.valueOf(50), BigDecimal.valueOf(10));
+    final var option2_1 = new OptionData(BigDecimal.valueOf(24200), null, null, peSellContract2);
+    final var option2_2 = new OptionData(BigDecimal.valueOf(24050), null, null, peHedgeContract2);
+    final var entryChain2 =
+        new OptionChainData(
+            new Records(
+                List.of("16-Jul-2026"),
+                List.of(option2_1, option2_2),
+                null,
+                BigDecimal.valueOf(24250),
+                null),
+            null);
+
+    // Exit Snapshot (premium decays to 5, hedge to 0)
+    final var peSellExitContract =
+        contractWithPremium(
+            BigDecimal.valueOf(5500), BigDecimal.valueOf(100), BigDecimal.valueOf(5));
+    final var peHedgeExitContract =
+        contractWithPremium(
+            BigDecimal.valueOf(3100), BigDecimal.valueOf(50), BigDecimal.valueOf(0));
+    final var exitOption1 =
+        new OptionData(BigDecimal.valueOf(24200), null, null, peSellExitContract);
+    final var exitOption2 =
+        new OptionData(BigDecimal.valueOf(24050), null, null, peHedgeExitContract);
+    final var exitChain =
+        new OptionChainData(
+            new Records(
+                List.of("16-Jul-2026"),
+                List.of(exitOption1, exitOption2),
+                null,
+                BigDecimal.valueOf(24350),
+                null),
+            null);
+
+    when(nseClient.fetchOptionChain(anyString()))
+        .thenReturn(entryChain1)
+        .thenReturn(entryChain2)
+        .thenReturn(exitChain);
+
+    service.fetchAndRecordOi(); // snap 1
+    service.fetchAndRecordOi(); // snap 2
+    service.analyzeAndPredict();
+    service.markPositionEntered();
+
+    service.fetchAndRecordOi(); // exit snap
+    service.notifyExitIfNeeded();
+
+    verify(telegramService, atLeastOnce())
+        .sendMessage(
+            argThat(msg -> msg.contains("Profit target reached") || msg.contains("PROFIT_TARGET")));
+  }
+
   private static OptionData optionData(
       final BigDecimal strike, final OptionContract pe, final OptionContract ce) {
     return new OptionData(strike, null, ce, pe);
@@ -400,6 +556,30 @@ class OiAnalysisServiceTest {
         null,
         null,
         null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null);
+  }
+
+  private static OptionContract contractWithPremium(
+      final BigDecimal openInterest, final BigDecimal changeInOi, final BigDecimal lastPrice) {
+    return new OptionContract(
+        null,
+        null,
+        null,
+        null,
+        openInterest,
+        changeInOi,
+        null,
+        null,
+        null,
+        lastPrice,
         null,
         null,
         null,

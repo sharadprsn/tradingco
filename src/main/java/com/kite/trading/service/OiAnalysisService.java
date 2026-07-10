@@ -68,12 +68,14 @@ public class OiAnalysisService {
   private static final BigDecimal DEPLOYED_CAPITAL = BigDecimal.valueOf(1_000_000);
   private static final BigDecimal TARGET_PCT = BigDecimal.valueOf(0.6);
   private static final BigDecimal STOP_LOSS_PCT = BigDecimal.valueOf(1.0);
-  private static final int LOT_SIZE_NIFTY = 50;
-  private static final int LOT_SIZE_SENSEX = 10;
+  private static final int LOT_SIZE_NIFTY = 65;
+  private static final int LOT_SIZE_SENSEX = 20;
 
   // === SuperTrend constants ===
   private static final int SUPERTREND_PERIOD = 3;
   private static final BigDecimal SUPERTREND_MULTIPLIER = BigDecimal.valueOf(3);
+
+  private static final BigDecimal MARGIN_PER_LOT = BigDecimal.valueOf(60_000);
 
   private final OptionChainClient optionChainClient;
   private final TelegramService telegramService;
@@ -101,6 +103,9 @@ public class OiAnalysisService {
   private volatile BigDecimal entrySoldStrike = BigDecimal.ZERO;
   private volatile String entryStrikeType = ""; // "PE" or "CE"
   private volatile boolean earlyWarningSent;
+  private volatile BigDecimal entrySoldPremium = BigDecimal.ZERO;
+  private volatile BigDecimal entryHedgeStrike = BigDecimal.ZERO;
+  private volatile BigDecimal entryHedgePremium = BigDecimal.ZERO;
 
   private volatile String currentIndex = "NIFTY";
 
@@ -561,6 +566,8 @@ public class OiAnalysisService {
           case STRIKE_BREACH ->
               "Underlying crossed sold strike – option is now ITM. Close position immediately.";
           case PROFIT_TARGET -> "Profit target reached – option decayed sufficiently. Book profit.";
+          case HARD_STOP -> "HARD STOP-LOSS triggered – option premium doubled. Exit immediately.";
+          case TRAILING_STOP -> "TRAILING STOP triggered – locking in profits. Exit immediately.";
           default -> "No exit signal.";
         };
 
@@ -736,23 +743,68 @@ public class OiAnalysisService {
     }
     final OiAnalysisResult analysis = lastAnalysis.get();
     if (analysis != null && !analysis.suggestedStrikes().isEmpty()) {
-      this.entrySoldStrike = analysis.suggestedStrikes().getFirst();
-      this.entryStrikeType =
-          switch (analysis.suggestedStrategy()) {
-            case "DIRECTIONAL PUT SELLING" -> "PE";
-            case "DIRECTIONAL CALL SELLING" -> "CE";
-            default -> "";
-          };
+      final String strategy = analysis.suggestedStrategy();
+      if ("DIRECTIONAL PUT SELLING".equals(strategy)) {
+        this.entrySoldStrike = analysis.suggestedStrikes().get(0);
+        this.entryStrikeType = "PE";
+        this.entrySoldPremium =
+            current != null ? lookupPremium(current, this.entrySoldStrike, "PE") : BigDecimal.ZERO;
+        final BigDecimal hedge =
+            current != null
+                ? findHedgeStrike(current.strikePremiums(), "BULLISH", analysis.suggestedStrikes())
+                : null;
+        this.entryHedgeStrike = hedge != null ? hedge : BigDecimal.ZERO;
+        this.entryHedgePremium =
+            (current != null && hedge != null)
+                ? lookupPremium(current, this.entryHedgeStrike, "PE")
+                : BigDecimal.ZERO;
+      } else if ("DIRECTIONAL CALL SELLING".equals(strategy)) {
+        this.entrySoldStrike = analysis.suggestedStrikes().get(0);
+        this.entryStrikeType = "CE";
+        this.entrySoldPremium =
+            current != null ? lookupPremium(current, this.entrySoldStrike, "CE") : BigDecimal.ZERO;
+        final BigDecimal hedge =
+            current != null
+                ? findHedgeStrike(current.strikePremiums(), "BEARISH", analysis.suggestedStrikes())
+                : null;
+        this.entryHedgeStrike = hedge != null ? hedge : BigDecimal.ZERO;
+        this.entryHedgePremium =
+            (current != null && hedge != null)
+                ? lookupPremium(current, this.entryHedgeStrike, "CE")
+                : BigDecimal.ZERO;
+      } else if ("SHORT STRANGLE".equals(strategy)) {
+        this.entrySoldStrike = analysis.suggestedStrikes().get(0); // Put leg
+        this.entryHedgeStrike =
+            analysis.suggestedStrikes().size() > 1
+                ? analysis.suggestedStrikes().get(1)
+                : BigDecimal.ZERO; // Call leg
+        this.entryStrikeType = "STRANGLE";
+        this.entrySoldPremium =
+            current != null ? lookupPremium(current, this.entrySoldStrike, "PE") : BigDecimal.ZERO;
+        this.entryHedgePremium =
+            (current != null && this.entryHedgeStrike.compareTo(BigDecimal.ZERO) > 0)
+                ? lookupPremium(current, this.entryHedgeStrike, "CE")
+                : BigDecimal.ZERO;
+      } else {
+        this.entrySoldStrike = analysis.suggestedStrikes().get(0);
+        this.entryStrikeType = "";
+        this.entrySoldPremium = BigDecimal.ZERO;
+        this.entryHedgeStrike = BigDecimal.ZERO;
+        this.entryHedgePremium = BigDecimal.ZERO;
+      }
     }
     this.confirmationStreak = 0;
     this.lastDetectedSignal = ExitSignal.NONE;
     this.earlyWarningSent = false;
     logger.info(
-        "Position entry recorded for OI monitoring at price={} direction={} strike={} {}",
+        "Position entry recorded for OI monitoring at price={} direction={} strategy={} soldStrike={} (premium={}) hedgeStrike={} (premium={})",
         entryPrice,
         entryDirection,
+        analysis != null ? analysis.suggestedStrategy() : "NONE",
         entrySoldStrike,
-        entryStrikeType);
+        entrySoldPremium,
+        entryHedgeStrike,
+        entryHedgePremium);
   }
 
   public void markPositionExited() {
@@ -763,6 +815,9 @@ public class OiAnalysisService {
     this.entrySoldStrike = BigDecimal.ZERO;
     this.entryStrikeType = "";
     this.earlyWarningSent = false;
+    this.entrySoldPremium = BigDecimal.ZERO;
+    this.entryHedgeStrike = BigDecimal.ZERO;
+    this.entryHedgePremium = BigDecimal.ZERO;
     logger.info("Position exit recorded, stopping OI monitoring");
   }
 
@@ -787,6 +842,9 @@ public class OiAnalysisService {
     entrySoldStrike = BigDecimal.ZERO;
     entryStrikeType = "";
     earlyWarningSent = false;
+    entrySoldPremium = BigDecimal.ZERO;
+    entryHedgeStrike = BigDecimal.ZERO;
+    entryHedgePremium = BigDecimal.ZERO;
     logger.info("OI Analysis Service reset");
   }
 
@@ -913,17 +971,20 @@ public class OiAnalysisService {
         .append(slAmt)
         .append(" (1%)");
 
-    final BigDecimal approxPremium =
-        targetAmt.divide(BigDecimal.valueOf(lotSz), 0, RoundingMode.HALF_UP);
-    final BigDecimal slPoints = slAmt.divide(BigDecimal.valueOf(lotSz), 0, RoundingMode.HALF_UP);
-    rec.append("\nLot: ")
-        .append(lotSz)
-        .append(" | Premium target: \u20B9")
-        .append(approxPremium)
-        .append("/unit")
-        .append(" | SL: ")
-        .append(slPoints)
-        .append(" pts");
+    final int lots = DEPLOYED_CAPITAL.divide(MARGIN_PER_LOT, 0, RoundingMode.DOWN).intValue();
+    final int totalQty = lots * lotSz;
+    final BigDecimal decayPointsNeeded =
+        targetAmt.divide(BigDecimal.valueOf(totalQty), 1, RoundingMode.HALF_UP);
+
+    rec.append("\nLots: ")
+        .append(lots)
+        .append(" (Qty: ")
+        .append(totalQty)
+        .append(") | Dynamic Position Sizing")
+        .append("\nDecay Target: ")
+        .append(decayPointsNeeded)
+        .append(" pts decay needed to hit target")
+        .append(" | SL: Exits at 2.0x net entry premium");
 
     rec.append("\nOI Reasoning: ");
     if (latest.largestPeOiStrike() != null
@@ -972,46 +1033,39 @@ public class OiAnalysisService {
       return strikes;
     }
 
+    final BigDecimal vix = fetchVix();
+    BigDecimal minPremium = BigDecimal.valueOf(30);
+    BigDecimal maxPremium = BigDecimal.valueOf(40);
+    if (vix != null) {
+      if (vix.compareTo(BigDecimal.valueOf(12)) < 0) {
+        minPremium = BigDecimal.valueOf(20);
+        maxPremium = BigDecimal.valueOf(30);
+      } else if (vix.compareTo(BigDecimal.valueOf(16)) > 0) {
+        minPremium = BigDecimal.valueOf(40);
+        maxPremium = BigDecimal.valueOf(55);
+      }
+    }
+
     switch (direction) {
       case "BULLISH" -> {
         final BigDecimal sellStrike =
             findStrikeByPremium(
-                latest.strikePremiums(),
-                "PE",
-                BigDecimal.valueOf(30),
-                BigDecimal.valueOf(40),
-                underlying,
-                true);
+                latest.strikePremiums(), "PE", minPremium, maxPremium, underlying, true);
         if (sellStrike != null) strikes.add(sellStrike);
       }
       case "BEARISH" -> {
         final BigDecimal sellStrike =
             findStrikeByPremium(
-                latest.strikePremiums(),
-                "CE",
-                BigDecimal.valueOf(30),
-                BigDecimal.valueOf(40),
-                underlying,
-                false);
+                latest.strikePremiums(), "CE", minPremium, maxPremium, underlying, false);
         if (sellStrike != null) strikes.add(sellStrike);
       }
       default -> {
         final BigDecimal putStrike =
             findStrikeByPremium(
-                latest.strikePremiums(),
-                "PE",
-                BigDecimal.valueOf(30),
-                BigDecimal.valueOf(40),
-                underlying,
-                true);
+                latest.strikePremiums(), "PE", minPremium, maxPremium, underlying, true);
         final BigDecimal callStrike =
             findStrikeByPremium(
-                latest.strikePremiums(),
-                "CE",
-                BigDecimal.valueOf(30),
-                BigDecimal.valueOf(40),
-                underlying,
-                false);
+                latest.strikePremiums(), "CE", minPremium, maxPremium, underlying, false);
         if (putStrike != null) strikes.add(putStrike);
         if (callStrike != null) strikes.add(callStrike);
       }
@@ -1257,11 +1311,27 @@ public class OiAnalysisService {
 
     final BigDecimal currentPrice = latest.underlyingValue();
 
-    if (isHardStopTriggered(currentPrice)) {
+    if (isHardStopTriggered(latest)) {
+      final BigDecimal entryNet =
+          "STRANGLE".equals(entryStrikeType)
+              ? entrySoldPremium.add(entryHedgePremium)
+              : entrySoldPremium.subtract(entryHedgePremium);
+      final BigDecimal currentSold =
+          "STRANGLE".equals(entryStrikeType)
+              ? lookupPremium(latest, entrySoldStrike, "PE")
+              : lookupPremium(latest, entrySoldStrike, entryStrikeType);
+      final BigDecimal currentHedge =
+          "STRANGLE".equals(entryStrikeType)
+              ? lookupPremium(latest, entryHedgeStrike, "CE")
+              : lookupPremium(latest, entryHedgeStrike, entryStrikeType);
+      final BigDecimal currentNet =
+          "STRANGLE".equals(entryStrikeType)
+              ? currentSold.add(currentHedge)
+              : currentSold.subtract(currentHedge);
       logger.warn(
-          "HARD STOP triggered at price={} (entry={}, direction={})",
-          currentPrice,
-          entryPrice,
+          "HARD STOP triggered at premium (entry net={}, current net={}, direction={})",
+          entryNet,
+          currentNet,
           entryDirection);
       return new ExitAssessment(ExitSignal.HARD_STOP, BigDecimal.valueOf(95), BigDecimal.ONE);
     }
@@ -1295,13 +1365,29 @@ public class OiAnalysisService {
       return new ExitAssessment(breachSignal, BigDecimal.valueOf(90), BigDecimal.ONE);
     }
 
-    final ExitSignal profitSignal = checkProfitTarget(currentPrice);
+    final ExitSignal profitSignal = checkProfitTarget(latest);
     if (profitSignal != ExitSignal.NONE) {
+      final BigDecimal entryNet =
+          "STRANGLE".equals(entryStrikeType)
+              ? entrySoldPremium.add(entryHedgePremium)
+              : entrySoldPremium.subtract(entryHedgePremium);
+      final BigDecimal currentSold =
+          "STRANGLE".equals(entryStrikeType)
+              ? lookupPremium(latest, entrySoldStrike, "PE")
+              : lookupPremium(latest, entrySoldStrike, entryStrikeType);
+      final BigDecimal currentHedge =
+          "STRANGLE".equals(entryStrikeType)
+              ? lookupPremium(latest, entryHedgeStrike, "CE")
+              : lookupPremium(latest, entryHedgeStrike, entryStrikeType);
+      final BigDecimal currentNet =
+          "STRANGLE".equals(entryStrikeType)
+              ? currentSold.add(currentHedge)
+              : currentSold.subtract(currentHedge);
       logger.info(
-          "{} triggered at price={} (entry={}, direction={})",
+          "{} triggered at premium (entry net={}, current net={}, direction={})",
           profitSignal,
-          currentPrice,
-          entryPrice,
+          entryNet,
+          currentNet,
           entryDirection);
       return new ExitAssessment(profitSignal, BigDecimal.valueOf(80), BigDecimal.ONE);
     }
@@ -1394,27 +1480,48 @@ public class OiAnalysisService {
     return new ExitAssessment(primarySignal, confidence, exitFraction);
   }
 
-  private boolean isHardStopTriggered(final BigDecimal currentPrice) {
-    if (entryPrice == null || entryPrice.compareTo(BigDecimal.ZERO) == 0) {
+  private BigDecimal lookupPremium(
+      final OiDataSnapshot snapshot, final BigDecimal strike, final String type) {
+    if (snapshot == null
+        || snapshot.strikePremiums() == null
+        || strike == null
+        || strike.compareTo(BigDecimal.ZERO) == 0) {
+      return BigDecimal.ZERO;
+    }
+    for (final var sp : snapshot.strikePremiums()) {
+      if (sp.strikePrice().compareTo(strike) == 0) {
+        return "PE".equals(type) ? safePremium(sp.pePremium()) : safePremium(sp.cePremium());
+      }
+    }
+    return BigDecimal.ZERO;
+  }
+
+  private boolean isHardStopTriggered(final OiDataSnapshot latest) {
+    if (!positionEntered || entrySoldPremium.compareTo(BigDecimal.ZERO) == 0) {
       return false;
     }
-    final BigDecimal priceMovePct =
-        currentPrice
-            .subtract(entryPrice)
-            .abs()
-            .multiply(BigDecimal.valueOf(100))
-            .divide(entryPrice, 2, RoundingMode.HALF_UP);
-    final boolean adverseMove;
-    if ("BULLISH".equals(entryDirection)) {
-      adverseMove =
-          currentPrice.compareTo(entryPrice) < 0 && priceMovePct.compareTo(HARD_STOP_LOSS_PCT) >= 0;
-    } else if ("BEARISH".equals(entryDirection)) {
-      adverseMove =
-          currentPrice.compareTo(entryPrice) > 0 && priceMovePct.compareTo(HARD_STOP_LOSS_PCT) >= 0;
+
+    BigDecimal currentNet;
+    BigDecimal entryNet;
+
+    if ("STRANGLE".equals(entryStrikeType)) {
+      final BigDecimal currentSold = lookupPremium(latest, entrySoldStrike, "PE");
+      final BigDecimal currentHedge = lookupPremium(latest, entryHedgeStrike, "CE");
+      currentNet = currentSold.add(currentHedge);
+      entryNet = entrySoldPremium.add(entryHedgePremium);
     } else {
-      adverseMove = priceMovePct.compareTo(HARD_STOP_LOSS_PCT) >= 0;
+      final BigDecimal currentSold = lookupPremium(latest, entrySoldStrike, entryStrikeType);
+      final BigDecimal currentHedge = lookupPremium(latest, entryHedgeStrike, entryStrikeType);
+      currentNet = currentSold.subtract(currentHedge);
+      entryNet = entrySoldPremium.subtract(entryHedgePremium);
     }
-    return adverseMove;
+
+    if (entryNet.compareTo(BigDecimal.ZERO) <= 0) {
+      return false;
+    }
+
+    // Stop loss if current net premium has doubled (2.0x)
+    return currentNet.compareTo(entryNet.multiply(BigDecimal.valueOf(2.0))) >= 0;
   }
 
   private boolean isTrailingStopTriggered(final BigDecimal currentPrice) {
@@ -1443,11 +1550,7 @@ public class OiAnalysisService {
   }
 
   private boolean isLossCapExceeded(final BigDecimal currentPrice) {
-    if (entryPrice == null || entryPrice.compareTo(BigDecimal.ZERO) == 0) {
-      return false;
-    }
-    final BigDecimal lossPct = estimateUnrealizedLossPct(currentPrice);
-    return lossPct.compareTo(LOSS_CAP_PCT) >= 0;
+    return false; // Disabled as it is redundant under option-premium stops
   }
 
   private BigDecimal estimateUnrealizedLossPct(final BigDecimal currentPrice) {
@@ -1475,6 +1578,7 @@ public class OiAnalysisService {
     if (entrySoldStrike == null
         || entrySoldStrike.compareTo(BigDecimal.ZERO) == 0
         || entryStrikeType.isEmpty()
+        || "STRANGLE".equals(entryStrikeType)
         || currentPrice == null) {
       return ExitSignal.NONE;
     }
@@ -1492,25 +1596,35 @@ public class OiAnalysisService {
     return ExitSignal.NONE;
   }
 
-  private ExitSignal checkProfitTarget(final BigDecimal currentPrice) {
-    if (entryPrice == null || entryPrice.compareTo(BigDecimal.ZERO) == 0 || currentPrice == null) {
+  private ExitSignal checkProfitTarget(final OiDataSnapshot latest) {
+    if (!positionEntered || entrySoldPremium.compareTo(BigDecimal.ZERO) == 0) {
       return ExitSignal.NONE;
     }
-    final BigDecimal favorableMovePct =
-        "BULLISH".equals(entryDirection)
-            ? currentPrice
-                .subtract(entryPrice)
-                .multiply(BigDecimal.valueOf(100))
-                .divide(entryPrice, 2, RoundingMode.HALF_UP)
-            : "BEARISH".equals(entryDirection)
-                ? entryPrice
-                    .subtract(currentPrice)
-                    .multiply(BigDecimal.valueOf(100))
-                    .divide(entryPrice, 2, RoundingMode.HALF_UP)
-                : BigDecimal.ZERO;
-    if (favorableMovePct.compareTo(BigDecimal.valueOf(0.5)) >= 0) {
+
+    BigDecimal currentNet;
+    BigDecimal entryNet;
+
+    if ("STRANGLE".equals(entryStrikeType)) {
+      final BigDecimal currentSold = lookupPremium(latest, entrySoldStrike, "PE");
+      final BigDecimal currentHedge = lookupPremium(latest, entryHedgeStrike, "CE");
+      currentNet = currentSold.add(currentHedge);
+      entryNet = entrySoldPremium.add(entryHedgePremium);
+    } else {
+      final BigDecimal currentSold = lookupPremium(latest, entrySoldStrike, entryStrikeType);
+      final BigDecimal currentHedge = lookupPremium(latest, entryHedgeStrike, entryStrikeType);
+      currentNet = currentSold.subtract(currentHedge);
+      entryNet = entrySoldPremium.subtract(entryHedgePremium);
+    }
+
+    if (entryNet.compareTo(BigDecimal.ZERO) <= 0) {
+      return ExitSignal.NONE;
+    }
+
+    // Take profit if current net premium has decayed to 20% (0.2x) or less
+    if (currentNet.compareTo(entryNet.multiply(BigDecimal.valueOf(0.2))) <= 0) {
       return ExitSignal.PROFIT_TARGET;
     }
+
     return ExitSignal.NONE;
   }
 

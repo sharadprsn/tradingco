@@ -19,7 +19,7 @@ public class IntradayOiScheduler {
 
   private static final Logger logger = LoggerFactory.getLogger(IntradayOiScheduler.class);
   private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
-  private static final LocalTime MARKET_START = LocalTime.of(9, 30);
+  private static final LocalTime MARKET_START = LocalTime.of(9, 15);
   private static final LocalTime PREDICTION_TIME_945 = LocalTime.of(9, 45);
   private static final LocalTime MARKET_CLOSE = LocalTime.of(15, 30);
   private static final int SIX_MINUTES_MS = 360_000;
@@ -28,6 +28,9 @@ public class IntradayOiScheduler {
   private final TelegramService telegramService;
 
   private volatile boolean prediction945Executed;
+  private volatile boolean autoEntryExecutedToday;
+
+  private static final LocalTime AUTO_ENTRY_TIME = LocalTime.of(9, 50);
 
   public IntradayOiScheduler(
       final OiAnalysisService oiAnalysisService, final TelegramService telegramService) {
@@ -58,6 +61,13 @@ public class IntradayOiScheduler {
         oiAnalysisService.checkAndNotifyDirectionChange();
       }
 
+      final boolean isPast950 = !now.isBefore(AUTO_ENTRY_TIME);
+      if (isPast950 && prediction945Executed && !autoEntryExecutedToday) {
+        oiAnalysisService.markPositionEntered();
+        autoEntryExecutedToday = true;
+        logger.info("9:50 AM automatic position entry executed");
+      }
+
       if (oiAnalysisService.isPositionEntered()) {
         oiAnalysisService.notifyExitIfNeeded();
       }
@@ -73,6 +83,7 @@ public class IntradayOiScheduler {
     logger.info("Resetting OI scheduler state for new trading day");
     oiAnalysisService.reset();
     prediction945Executed = false;
+    autoEntryExecutedToday = false;
     telegramService.sendMessage("Jai Shree Krishna");
     logger.info("Reset message sent via Telegram");
   }
@@ -103,6 +114,7 @@ public class IntradayOiScheduler {
     }
     oiAnalysisService.reset();
     prediction945Executed = false;
+    autoEntryExecutedToday = false;
   }
 
   private static OiDataSnapshot findClosestTo(
