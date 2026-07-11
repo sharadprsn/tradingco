@@ -49,7 +49,7 @@ public class OiAnalysisService {
   private static final int STRIKE_INTERVAL_NIFTY = 50;
   private static final int STRIKE_INTERVAL_SENSEX = 100;
   private static final BigDecimal EXIT_PCR_SHIFT = BigDecimal.valueOf(0.3);
-  private static final BigDecimal EXIT_OI_SURGE = BigDecimal.valueOf(50);
+  private static final BigDecimal EXIT_OI_SURGE_PCT = BigDecimal.valueOf(0.03);
   private static final BigDecimal MIN_PCR_CHANGE_FOR_NOTIFICATION = BigDecimal.valueOf(0.05);
   private static final BigDecimal MIN_OI_CHANGE_FRACTION = BigDecimal.valueOf(0.05);
 
@@ -77,9 +77,11 @@ public class OiAnalysisService {
   private static final BigDecimal STOP_LOSS_PCT = BigDecimal.valueOf(1.0);
   private static final int LOT_SIZE_NIFTY = 65;
   private static final int LOT_SIZE_SENSEX = 20;
+  private static final BigDecimal MIN_SPREAD_NIFTY = BigDecimal.valueOf(100);
+  private static final BigDecimal MIN_SPREAD_SENSEX = BigDecimal.valueOf(200);
 
   // === SuperTrend constants ===
-  private static final int SUPERTREND_PERIOD = 3;
+  private static final int SUPERTREND_PERIOD = 5;
   private static final BigDecimal SUPERTREND_MULTIPLIER = BigDecimal.valueOf(3);
 
   private static final BigDecimal MARGIN_PER_LOT = BigDecimal.valueOf(60_000);
@@ -114,9 +116,15 @@ public class OiAnalysisService {
   private volatile BigDecimal entrySoldStrike = BigDecimal.ZERO;
   private volatile String entryStrikeType = ""; // "PE" or "CE"
   private volatile boolean earlyWarningSent;
+  private volatile BigDecimal cumulativeExitFraction = BigDecimal.ZERO;
   private volatile BigDecimal entrySoldPremium = BigDecimal.ZERO;
   private volatile BigDecimal entryHedgeStrike = BigDecimal.ZERO;
   private volatile BigDecimal entryHedgePremium = BigDecimal.ZERO;
+
+  private volatile BigDecimal entryLongPutStrike = BigDecimal.ZERO;
+  private volatile BigDecimal entryLongPutPremium = BigDecimal.ZERO;
+  private volatile BigDecimal entryLongCallStrike = BigDecimal.ZERO;
+  private volatile BigDecimal entryLongCallPremium = BigDecimal.ZERO;
 
   private volatile String currentIndex = "NIFTY";
 
@@ -483,45 +491,94 @@ public class OiAnalysisService {
     }
 
     if (mlService.isModelLoaded() && !"NO_TRADE".equals(strategy)) {
-      final MlService.PredictResult mlResult = mlService.predict(snapshots);
-      if (mlResult != null) {
-        final BigDecimal mlConfidence = BigDecimal.valueOf(mlResult.confidence() * 100);
-        if (mlConfidence.compareTo(finalConfidence) > 0) {
+      final MlService.WeightedPredictResult weightedResult = mlService.weightedPredict(snapshots);
+      if (weightedResult != null) {
+        final double mlConfPct = weightedResult.confidence() * 100;
+        final BigDecimal blendWeight = BigDecimal.valueOf(weightedResult.blendWeight());
+        final BigDecimal ruleWeight = BigDecimal.ONE.subtract(blendWeight);
+        // Weighted blend: final = ruleWeight * rule + blendWeight * ML
+        final BigDecimal blendedConfidence;
+        final String blendedDirection;
+        if (weightedResult.direction().equals(finalDirection)) {
+          blendedConfidence =
+              BigDecimal.valueOf(mlConfPct)
+                  .multiply(blendWeight)
+                  .add(finalConfidence.multiply(ruleWeight));
+          blendedDirection = finalDirection;
           reasoning
-              .append("ML overrides (")
-              .append(mlResult.direction())
+              .append("ML agrees (")
+              .append(weightedResult.direction())
               .append(", ")
-              .append(mlConfidence.setScale(1, RoundingMode.HALF_UP))
-              .append("%). ");
-          finalDirection = mlResult.direction();
-          finalConfidence = mlConfidence;
+              .append(String.format("%.1f", mlConfPct))
+              .append("%, weight=")
+              .append(String.format("%.2f", weightedResult.blendWeight()))
+              .append("). ");
         } else {
-          reasoning
-              .append("Rules prevail (")
-              .append(finalDirection)
-              .append(", ")
-              .append(finalConfidence.setScale(1, RoundingMode.HALF_UP))
-              .append("%) over ML (")
-              .append(mlResult.direction())
-              .append(", ")
-              .append(mlConfidence.setScale(1, RoundingMode.HALF_UP))
-              .append("%). ");
+          final double confDiff = mlConfPct - finalConfidence.doubleValue();
+          if (confDiff > 15.0 && weightedResult.blendWeight() > 0.5) {
+            blendedDirection = weightedResult.direction();
+            blendedConfidence =
+                finalConfidence
+                    .multiply(ruleWeight)
+                    .add(BigDecimal.valueOf(mlConfPct).multiply(blendWeight));
+            reasoning
+                .append("ML overrides (")
+                .append(weightedResult.direction())
+                .append(", ")
+                .append(String.format("%.1f", mlConfPct))
+                .append("%, weight=")
+                .append(String.format("%.2f", weightedResult.blendWeight()))
+                .append("). ");
+          } else {
+            blendedDirection = finalDirection;
+            blendedConfidence = finalConfidence;
+            reasoning
+                .append("Rules prevail (")
+                .append(finalDirection)
+                .append(", ")
+                .append(finalConfidence.setScale(1, RoundingMode.HALF_UP))
+                .append("%) over ML (")
+                .append(weightedResult.direction())
+                .append(", ")
+                .append(String.format("%.1f", mlConfPct))
+                .append("%, weight=")
+                .append(String.format("%.2f", weightedResult.blendWeight()))
+                .append("). ");
+          }
         }
+        finalDirection = blendedDirection;
+        finalConfidence = blendedConfidence.min(BigDecimal.valueOf(95));
       }
     }
 
     final BigDecimal sentimentScore =
         latest.marketSentiment() != null ? latest.marketSentiment() : BigDecimal.ZERO;
     if (sentimentScore.compareTo(BigDecimal.valueOf(0.15)) > 0) {
+      final boolean sentimentAligns = "BULLISH".equals(finalDirection);
+      if (sentimentAligns) {
+        finalConfidence = finalConfidence.add(BigDecimal.valueOf(5));
+      } else {
+        finalConfidence = finalConfidence.subtract(BigDecimal.valueOf(5));
+      }
       reasoning
           .append("Market sentiment is bullish (")
           .append(sentimentScore.setScale(2, RoundingMode.HALF_UP))
-          .append("). ");
+          .append(
+              sentimentAligns ? "), aligning with direction." : "), conflicting with direction.")
+          .append(" ");
     } else if (sentimentScore.compareTo(BigDecimal.valueOf(-0.15)) < 0) {
+      final boolean sentimentAligns = "BEARISH".equals(finalDirection);
+      if (sentimentAligns) {
+        finalConfidence = finalConfidence.add(BigDecimal.valueOf(5));
+      } else {
+        finalConfidence = finalConfidence.subtract(BigDecimal.valueOf(5));
+      }
       reasoning
           .append("Market sentiment is bearish (")
           .append(sentimentScore.setScale(2, RoundingMode.HALF_UP))
-          .append("). ");
+          .append(
+              sentimentAligns ? "), aligning with direction." : "), conflicting with direction.")
+          .append(" ");
     }
 
     final BigDecimal vix = fetchVix();
@@ -785,6 +842,16 @@ public class OiAnalysisService {
       telegramService.sendMessage(report);
       predictionSentToday = true;
       initialPredictionDirection = result.direction();
+      // Record prediction for ML accuracy tracking
+      if (!snapshots.isEmpty()) {
+        final OiDataSnapshot first = snapshots.getFirst();
+        final double entryVal =
+            first.underlyingValue() != null ? first.underlyingValue().doubleValue() : 0.0;
+        mlService.recordPrediction(
+            result.direction(),
+            result.confidence().doubleValue() / 100.0,
+            entryVal > 0 ? 0.0 : 0.0);
+      }
       logger.info("Prediction sent via Telegram: {}", result.direction());
     }
   }
@@ -863,26 +930,28 @@ public class OiAnalysisService {
       final String report = buildExitReport(assessment, current, newRecommendation);
       telegramService.sendMessage(report);
 
-      final boolean isHardExit =
-          assessment.signal() == ExitSignal.HARD_STOP
-              || assessment.signal() == ExitSignal.TRAILING_STOP;
-      if (!isHardExit) {
-        lastExitFiredAt = Instant.now();
-      }
-      confirmationStreak = 0;
-      lastDetectedSignal = ExitSignal.NONE;
-      earlyWarningSent = false;
-
       if (assessment.exitFraction().compareTo(BigDecimal.ONE) >= 0) {
+        markPositionExited();
         logger.warn(
-            "Full exit signal fired: {} (confidence: {}%)",
+            "Full exit signal fired: {} (confidence: {}%) – position closed",
             assessment.signal(), assessment.confidence());
       } else {
+        cumulativeExitFraction = cumulativeExitFraction.add(assessment.exitFraction());
+        lastExitFiredAt = Instant.now();
+        confirmationStreak = 0;
+        lastDetectedSignal = ExitSignal.NONE;
+        earlyWarningSent = false;
         logger.warn(
-            "Partial exit signal fired: {} (confidence: {}%, fraction: {}%)",
+            "Partial exit signal fired: {} (confidence: {}%, fraction: {}%, cumulative: {}%)",
             assessment.signal(),
             assessment.confidence(),
-            assessment.exitFraction().multiply(BigDecimal.valueOf(100)));
+            assessment.exitFraction().multiply(BigDecimal.valueOf(100)),
+            cumulativeExitFraction.multiply(BigDecimal.valueOf(100)));
+        // Escalate to full exit if cumulative fraction hits or exceeds 100%
+        if (cumulativeExitFraction.compareTo(BigDecimal.ONE) >= 0) {
+          markPositionExited();
+          logger.warn("Cumulative exit fraction reached 100% – position fully closed");
+        }
       }
     }
   }
@@ -928,19 +997,50 @@ public class OiAnalysisService {
             (current != null && hedge != null)
                 ? lookupPremium(current, this.entryHedgeStrike, "CE")
                 : BigDecimal.ZERO;
-      } else if ("SHORT STRANGLE".equals(strategy)) {
-        this.entrySoldStrike = analysis.suggestedStrikes().get(0); // Put leg
+      } else if ("SHORT IRON CONDOR".equals(strategy)) {
+        this.entrySoldStrike = analysis.suggestedStrikes().get(0); // Short Put
         this.entryHedgeStrike =
             analysis.suggestedStrikes().size() > 1
                 ? analysis.suggestedStrikes().get(1)
-                : BigDecimal.ZERO; // Call leg
-        this.entryStrikeType = "STRANGLE";
+                : BigDecimal.ZERO; // Short Call
+        this.entryStrikeType = "IRON_CONDOR";
         this.entrySoldPremium =
             current != null ? lookupPremium(current, this.entrySoldStrike, "PE") : BigDecimal.ZERO;
         this.entryHedgePremium =
             (current != null && this.entryHedgeStrike.compareTo(BigDecimal.ZERO) > 0)
                 ? lookupPremium(current, this.entryHedgeStrike, "CE")
                 : BigDecimal.ZERO;
+        // Bought wings further OTM at delta ~0.05
+        final double daysToExpiryWing = computeDaysToExpiry();
+        final List<OiDataSnapshot.StrikePremium> premiums =
+            current != null ? current.strikePremiums() : List.of();
+        final BigDecimal underlying = entryPrice;
+        BigDecimal longPut =
+            findWingStrikeByDelta(
+                premiums, "PE", this.entrySoldStrike, -0.05, underlying, daysToExpiryWing);
+        this.entryLongPutStrike = longPut != null ? longPut : BigDecimal.ZERO;
+        this.entryLongPutPremium =
+            (current != null && this.entryLongPutStrike.compareTo(BigDecimal.ZERO) > 0)
+                ? lookupPremium(current, this.entryLongPutStrike, "PE")
+                : BigDecimal.ZERO;
+        BigDecimal longCall =
+            findWingStrikeByDelta(
+                premiums, "CE", this.entryHedgeStrike, 0.05, underlying, daysToExpiryWing);
+        this.entryLongCallStrike = longCall != null ? longCall : BigDecimal.ZERO;
+        this.entryLongCallPremium =
+            (current != null && this.entryLongCallStrike.compareTo(BigDecimal.ZERO) > 0)
+                ? lookupPremium(current, this.entryLongCallStrike, "CE")
+                : BigDecimal.ZERO;
+        logger.info(
+            "Iron condor: Short PE={}@{}, Long PE={}@{}, Short CE={}@{}, Long CE={}@{}",
+            this.entrySoldStrike,
+            this.entrySoldPremium,
+            this.entryLongPutStrike,
+            this.entryLongPutPremium,
+            this.entryHedgeStrike,
+            this.entryHedgePremium,
+            this.entryLongCallStrike,
+            this.entryLongCallPremium);
       } else {
         this.entrySoldStrike = analysis.suggestedStrikes().get(0);
         this.entryStrikeType = "";
@@ -952,6 +1052,7 @@ public class OiAnalysisService {
     this.confirmationStreak = 0;
     this.lastDetectedSignal = ExitSignal.NONE;
     this.earlyWarningSent = false;
+    this.cumulativeExitFraction = BigDecimal.ZERO;
     logger.info(
         "Position entry recorded for OI monitoring at price={} direction={} strategy={} soldStrike={} (premium={}) hedgeStrike={} (premium={})",
         entryPrice,
@@ -974,6 +1075,11 @@ public class OiAnalysisService {
     this.entrySoldPremium = BigDecimal.ZERO;
     this.entryHedgeStrike = BigDecimal.ZERO;
     this.entryHedgePremium = BigDecimal.ZERO;
+    this.entryLongPutStrike = BigDecimal.ZERO;
+    this.entryLongPutPremium = BigDecimal.ZERO;
+    this.entryLongCallStrike = BigDecimal.ZERO;
+    this.entryLongCallPremium = BigDecimal.ZERO;
+    this.cumulativeExitFraction = BigDecimal.ZERO;
     logger.info("Position exit recorded, stopping OI monitoring");
   }
 
@@ -1096,9 +1202,11 @@ public class OiAnalysisService {
           }
           case "NEUTRAL" -> {
             if (strikes.size() < 2) {
-              yield "SELL PE & CE (" + expiry + ")";
+              yield "SHORT IRON CONDOR - no suitable strikes found";
             }
-            yield String.format("SELL %s PE & %s CE (%s)", strikes.get(0), strikes.get(1), expiry);
+            yield String.format(
+                "SHORT IRON CONDOR: Sell %.0f PE / Sell %.0f CE + wings (%s)",
+                strikes.get(0), strikes.get(1), expiry);
           }
           default -> "";
         };
@@ -1132,7 +1240,9 @@ public class OiAnalysisService {
         .append(slAmt)
         .append(" (1%)");
 
-    final int lots = DEPLOYED_CAPITAL.divide(MARGIN_PER_LOT, 0, RoundingMode.DOWN).intValue();
+    final int maxLots = DEPLOYED_CAPITAL.divide(MARGIN_PER_LOT, 0, RoundingMode.DOWN).intValue();
+    final int lots =
+        Math.max(1, maxLots * confidence.min(BigDecimal.valueOf(100)).intValue() / 100);
     final int totalQty = lots * lotSz;
     final BigDecimal decayPointsNeeded =
         targetAmt.divide(BigDecimal.valueOf(totalQty), 1, RoundingMode.HALF_UP);
@@ -1196,9 +1306,12 @@ public class OiAnalysisService {
               expiryDate,
               sellStr,
               hedgeStr,
-              "BULLISH".equals(direction) ? "PE" : "BEARISH".equals(direction) ? "CE" : "STRANGLE",
+              "BULLISH".equals(direction)
+                  ? "PE"
+                  : "BEARISH".equals(direction) ? "CE" : "IRON_CONDOR",
               totalQty,
-              direction);
+              direction,
+              latest);
       rec.append("\n\n\uD83D\uDCCB Zerodha Basket Order JSON:\n```json\n")
           .append(basketJson)
           .append("\n```");
@@ -1211,7 +1324,7 @@ public class OiAnalysisService {
     return switch (direction) {
       case "BULLISH" -> "DIRECTIONAL PUT SELLING";
       case "BEARISH" -> "DIRECTIONAL CALL SELLING";
-      default -> "SHORT STRANGLE";
+      default -> "SHORT IRON CONDOR";
     };
   }
 
@@ -1233,6 +1346,12 @@ public class OiAnalysisService {
     if (!knownExpiryDates.isEmpty()) {
       long days = ChronoUnit.DAYS.between(LocalDate.now(clock), knownExpiryDates.get(0));
       daysToExpiry = days <= 0 ? 0.1 : (double) days;
+    }
+
+    // Skip trade when DTE < 0.5 (same-day expiry = extreme gamma risk)
+    if (daysToExpiry < 0.5) {
+      logger.warn("Same-day expiry (DTE={}), skipping trade due to gamma risk", daysToExpiry);
+      return strikes;
     }
 
     BigDecimal minPremium = BigDecimal.valueOf(30);
@@ -1592,15 +1711,6 @@ public class OiAnalysisService {
       return new ExitAssessment(ExitSignal.TRAILING_STOP, BigDecimal.valueOf(90), BigDecimal.ONE);
     }
 
-    if (isLossCapExceeded(currentPrice)) {
-      logger.warn(
-          "LOSS CAP exceeded at price={} (entry={}, direction={})",
-          currentPrice,
-          entryPrice,
-          entryDirection);
-      return new ExitAssessment(ExitSignal.HARD_STOP, BigDecimal.valueOf(95), BigDecimal.ONE);
-    }
-
     final ExitSignal breachSignal = checkStrikeBreach(currentPrice);
     if (breachSignal != ExitSignal.NONE) {
       logger.warn(
@@ -1655,7 +1765,11 @@ public class OiAnalysisService {
 
     final BigDecimal totalOiChange =
         latest.totalPeOiChange().abs().add(latest.totalCeOiChange().abs());
-    final boolean oiSurgeTriggered = totalOiChange.compareTo(EXIT_OI_SURGE) > 0;
+    final BigDecimal totalOi = latest.totalPeOi().add(latest.totalCeOi());
+    final boolean oiSurgeTriggered =
+        totalOi.compareTo(BigDecimal.ZERO) > 0
+            && totalOiChange.divide(totalOi, 4, RoundingMode.HALF_UP).compareTo(EXIT_OI_SURGE_PCT)
+                > 0;
 
     final String currentDir = computeRollingDirection();
     final boolean directionReversalTriggered =
@@ -1751,7 +1865,18 @@ public class OiAnalysisService {
     BigDecimal currentNet;
     BigDecimal entryNet;
 
-    if ("STRANGLE".equals(entryStrikeType)) {
+    if ("IRON_CONDOR".equals(entryStrikeType)) {
+      final BigDecimal currentPut = lookupPremium(latest, entrySoldStrike, "PE");
+      final BigDecimal currentCall = lookupPremium(latest, entryHedgeStrike, "CE");
+      final BigDecimal currentLongPut = lookupPremium(latest, entryLongPutStrike, "PE");
+      final BigDecimal currentLongCall = lookupPremium(latest, entryLongCallStrike, "CE");
+      currentNet = currentPut.add(currentCall).subtract(currentLongPut).subtract(currentLongCall);
+      entryNet =
+          entrySoldPremium
+              .add(entryHedgePremium)
+              .subtract(entryLongPutPremium)
+              .subtract(entryLongCallPremium);
+    } else if ("STRANGLE".equals(entryStrikeType)) {
       final BigDecimal currentSold = lookupPremium(latest, entrySoldStrike, "PE");
       final BigDecimal currentHedge = lookupPremium(latest, entryHedgeStrike, "CE");
       currentNet = currentSold.add(currentHedge);
@@ -1768,7 +1893,32 @@ public class OiAnalysisService {
     }
 
     // Stop loss if current net premium has doubled (2.0x)
-    return currentNet.compareTo(entryNet.multiply(BigDecimal.valueOf(2.0))) >= 0;
+    if (currentNet.compareTo(entryNet.multiply(BigDecimal.valueOf(2.0))) >= 0) {
+      return true;
+    }
+
+    // Also check sold leg independently (ignoring hedge protection)
+    final BigDecimal currentSoldLeg =
+        lookupPremium(
+            latest,
+            entrySoldStrike,
+            entryStrikeType.isEmpty()
+                    || "STRANGLE".equals(entryStrikeType)
+                    || "IRON_CONDOR".equals(entryStrikeType)
+                ? "PE"
+                : entryStrikeType);
+    if (currentSoldLeg.compareTo(entrySoldPremium.multiply(BigDecimal.valueOf(2.5))) >= 0) {
+      return true;
+    }
+
+    if ("IRON_CONDOR".equals(entryStrikeType)) {
+      final BigDecimal currentCallLeg = lookupPremium(latest, entryHedgeStrike, "CE");
+      if (currentCallLeg.compareTo(entryHedgePremium.multiply(BigDecimal.valueOf(2.5))) >= 0) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   private boolean isTrailingStopTriggered(final BigDecimal currentPrice) {
@@ -1796,10 +1946,6 @@ public class OiAnalysisService {
     return false;
   }
 
-  private boolean isLossCapExceeded(final BigDecimal currentPrice) {
-    return false; // Disabled as it is redundant under option-premium stops
-  }
-
   private BigDecimal estimateUnrealizedLossPct(final BigDecimal currentPrice) {
     if (entryPrice == null || entryPrice.compareTo(BigDecimal.ZERO) == 0) {
       return BigDecimal.ZERO;
@@ -1822,20 +1968,34 @@ public class OiAnalysisService {
   }
 
   private ExitSignal checkStrikeBreach(final BigDecimal currentPrice) {
+    if (currentPrice == null) {
+      return ExitSignal.NONE;
+    }
+
+    if ("IRON_CONDOR".equals(entryStrikeType)) {
+      // Check both short legs
+      if (entrySoldStrike.compareTo(BigDecimal.ZERO) > 0
+          && currentPrice.compareTo(entrySoldStrike) <= 0) {
+        return ExitSignal.STRIKE_BREACH;
+      }
+      if (entryHedgeStrike.compareTo(BigDecimal.ZERO) > 0
+          && currentPrice.compareTo(entryHedgeStrike) >= 0) {
+        return ExitSignal.STRIKE_BREACH;
+      }
+      return ExitSignal.NONE;
+    }
+
     if (entrySoldStrike == null
         || entrySoldStrike.compareTo(BigDecimal.ZERO) == 0
         || entryStrikeType.isEmpty()
-        || "STRANGLE".equals(entryStrikeType)
-        || currentPrice == null) {
+        || "STRANGLE".equals(entryStrikeType)) {
       return ExitSignal.NONE;
     }
     if ("PE".equals(entryStrikeType)) {
-      // Sold PUT expecting bullish move; breach if price drops below strike
       if (currentPrice.compareTo(entrySoldStrike) <= 0) {
         return ExitSignal.STRIKE_BREACH;
       }
     } else if ("CE".equals(entryStrikeType)) {
-      // Sold CALL expecting bearish move; breach if price rises above strike
       if (currentPrice.compareTo(entrySoldStrike) >= 0) {
         return ExitSignal.STRIKE_BREACH;
       }
@@ -1851,7 +2011,18 @@ public class OiAnalysisService {
     BigDecimal currentNet;
     BigDecimal entryNet;
 
-    if ("STRANGLE".equals(entryStrikeType)) {
+    if ("IRON_CONDOR".equals(entryStrikeType)) {
+      final BigDecimal currentPut = lookupPremium(latest, entrySoldStrike, "PE");
+      final BigDecimal currentCall = lookupPremium(latest, entryHedgeStrike, "CE");
+      final BigDecimal currentLongPut = lookupPremium(latest, entryLongPutStrike, "PE");
+      final BigDecimal currentLongCall = lookupPremium(latest, entryLongCallStrike, "CE");
+      currentNet = currentPut.add(currentCall).subtract(currentLongPut).subtract(currentLongCall);
+      entryNet =
+          entrySoldPremium
+              .add(entryHedgePremium)
+              .subtract(entryLongPutPremium)
+              .subtract(entryLongCallPremium);
+    } else if ("STRANGLE".equals(entryStrikeType)) {
       final BigDecimal currentSold = lookupPremium(latest, entrySoldStrike, "PE");
       final BigDecimal currentHedge = lookupPremium(latest, entryHedgeStrike, "CE");
       currentNet = currentSold.add(currentHedge);
@@ -2122,6 +2293,58 @@ public class OiAnalysisService {
     return best;
   }
 
+  private double computeDaysToExpiry() {
+    if (!knownExpiryDates.isEmpty()) {
+      long days = ChronoUnit.DAYS.between(LocalDate.now(clock), knownExpiryDates.getFirst());
+      return days <= 0 ? 0.1 : (double) days;
+    }
+    return 0.5;
+  }
+
+  private BigDecimal findWingStrikeByDelta(
+      final List<OiDataSnapshot.StrikePremium> premiums,
+      final String type,
+      final BigDecimal referenceStrike,
+      final double targetDelta,
+      final BigDecimal underlying,
+      final double daysToExpiry) {
+    if (referenceStrike == null || referenceStrike.compareTo(BigDecimal.ZERO) == 0) return null;
+    BigDecimal best = null;
+    double bestDiff = Double.MAX_VALUE;
+    final double vixVal = fetchVix() != null ? fetchVix().doubleValue() : 15.0;
+
+    for (final OiDataSnapshot.StrikePremium sp : premiums) {
+      final BigDecimal premium = "PE".equals(type) ? sp.pePremium() : sp.cePremium();
+      if (premium == null || premium.compareTo(BigDecimal.ZERO) <= 0) continue;
+
+      final boolean isFurtherOtm =
+          "PE".equals(type)
+              ? sp.strikePrice().compareTo(referenceStrike) < 0
+              : sp.strikePrice().compareTo(referenceStrike) > 0;
+      if (!isFurtherOtm) continue;
+
+      final BigDecimal iv = "PE".equals(type) ? sp.peIv() : sp.ceIv();
+      final double ivVal =
+          (iv != null && iv.compareTo(BigDecimal.ZERO) > 0) ? iv.doubleValue() : vixVal;
+
+      final double delta =
+          calculateDelta(
+              underlying.doubleValue(),
+              sp.strikePrice().doubleValue(),
+              ivVal,
+              daysToExpiry,
+              "CE".equals(type));
+
+      final double absDelta = Math.abs(delta);
+      final double diff = Math.abs(absDelta - Math.abs(targetDelta));
+      if (best == null || diff < bestDiff) {
+        best = sp.strikePrice();
+        bestDiff = diff;
+      }
+    }
+    return best;
+  }
+
   private BigDecimal findHedgeStrikeByDelta(
       final List<OiDataSnapshot.StrikePremium> premiums,
       final String type,
@@ -2190,85 +2413,140 @@ public class OiAnalysisService {
       final BigDecimal hedgeStrike,
       final String type,
       final int quantity,
-      final String direction) {
+      final String direction,
+      final OiDataSnapshot latest) {
     final StringBuilder json = new StringBuilder();
     json.append("[\n");
 
-    if ("BULLISH".equals(direction) || "BEARISH".equals(direction)) {
+    if ("IRON_CONDOR".equals(type)) {
+      // 4-leg iron condor: SELL PE, BUY PE, SELL CE, BUY CE
+      final BigDecimal longPutStrike =
+          findWingStrikeByDelta(
+              latest.strikePremiums(),
+              "PE",
+              sellStrike,
+              -0.05,
+              latest.underlyingValue(),
+              computeDaysToExpiry());
+      final BigDecimal longCallStrike =
+          findWingStrikeByDelta(
+              latest.strikePremiums(),
+              "CE",
+              hedgeStrike,
+              0.05,
+              latest.underlyingValue(),
+              computeDaysToExpiry());
+      final BigDecimal longPutPremium =
+          longPutStrike != null ? lookupPremium(latest, longPutStrike, "PE") : BigDecimal.ZERO;
+      final BigDecimal longCallPremium =
+          longCallStrike != null ? lookupPremium(latest, longCallStrike, "CE") : BigDecimal.ZERO;
+      final BigDecimal shortPutPremium = lookupPremium(latest, sellStrike, "PE");
+      final BigDecimal shortCallPremium = lookupPremium(latest, hedgeStrike, "CE");
+
+      appendLeg(
+          json,
+          buildZerodhaSymbol(index, expiryDate, sellStrike, "PE"),
+          "SELL",
+          shortPutPremium,
+          quantity);
+      json.append(",\n");
+      appendLeg(
+          json,
+          buildZerodhaSymbol(
+              index, expiryDate, longPutStrike != null ? longPutStrike : BigDecimal.ZERO, "PE"),
+          "BUY",
+          longPutPremium,
+          quantity);
+      json.append(",\n");
+      appendLeg(
+          json,
+          buildZerodhaSymbol(index, expiryDate, hedgeStrike, "CE"),
+          "SELL",
+          shortCallPremium,
+          quantity);
+      json.append(",\n");
+      appendLeg(
+          json,
+          buildZerodhaSymbol(
+              index, expiryDate, longCallStrike != null ? longCallStrike : BigDecimal.ZERO, "CE"),
+          "BUY",
+          longCallPremium,
+          quantity);
+      json.append("\n");
+    } else if ("BULLISH".equals(direction) || "BEARISH".equals(direction)) {
       final String optType = "BULLISH".equals(direction) ? "PE" : "CE";
-      final String hedgeSymbol = buildZerodhaSymbol(index, expiryDate, hedgeStrike, optType);
-      final String sellSymbol = buildZerodhaSymbol(index, expiryDate, sellStrike, optType);
+      final BigDecimal hedgePremium = lookupPremium(latest, hedgeStrike, optType);
+      final BigDecimal sellPremium = lookupPremium(latest, sellStrike, optType);
 
       // Leg 1: BUY (Hedge)
-      json.append("  {\n")
-          .append("    \"variety\": \"regular\",\n")
-          .append("    \"tradingsymbol\": \"")
-          .append(hedgeSymbol)
-          .append("\",\n")
-          .append("    \"exchange\": \"NFO\",\n")
-          .append("    \"transaction_type\": \"BUY\",\n")
-          .append("    \"order_type\": \"MARKET\",\n")
-          .append("    \"quantity\": ")
-          .append(quantity)
-          .append(",\n")
-          .append("    \"product\": \"NRML\",\n")
-          .append("    \"validity\": \"DAY\"\n")
-          .append("  },\n");
+      appendLeg(
+          json,
+          buildZerodhaSymbol(index, expiryDate, hedgeStrike, optType),
+          "BUY",
+          hedgePremium,
+          quantity);
+      json.append(",\n");
 
       // Leg 2: SELL (Short)
-      json.append("  {\n")
-          .append("    \"variety\": \"regular\",\n")
-          .append("    \"tradingsymbol\": \"")
-          .append(sellSymbol)
-          .append("\",\n")
-          .append("    \"exchange\": \"NFO\",\n")
-          .append("    \"transaction_type\": \"SELL\",\n")
-          .append("    \"order_type\": \"MARKET\",\n")
-          .append("    \"quantity\": ")
-          .append(quantity)
-          .append(",\n")
-          .append("    \"product\": \"NRML\",\n")
-          .append("    \"validity\": \"DAY\"\n")
-          .append("  }\n");
+      appendLeg(
+          json,
+          buildZerodhaSymbol(index, expiryDate, sellStrike, optType),
+          "SELL",
+          sellPremium,
+          quantity);
+      json.append("\n");
     } else {
-      // Neutral / Strangle
-      final String putSymbol = buildZerodhaSymbol(index, expiryDate, sellStrike, "PE");
-      final String callSymbol = buildZerodhaSymbol(index, expiryDate, hedgeStrike, "CE");
+      // Fallback: short strangle (no wings)
+      final BigDecimal putPremium = lookupPremium(latest, sellStrike, "PE");
+      final BigDecimal callPremium = lookupPremium(latest, hedgeStrike, "CE");
 
-      // Put Leg
-      json.append("  {\n")
-          .append("    \"variety\": \"regular\",\n")
-          .append("    \"tradingsymbol\": \"")
-          .append(putSymbol)
-          .append("\",\n")
-          .append("    \"exchange\": \"NFO\",\n")
-          .append("    \"transaction_type\": \"SELL\",\n")
-          .append("    \"order_type\": \"MARKET\",\n")
-          .append("    \"quantity\": ")
-          .append(quantity)
-          .append(",\n")
-          .append("    \"product\": \"NRML\",\n")
-          .append("    \"validity\": \"DAY\"\n")
-          .append("  },\n");
-
-      // Call Leg
-      json.append("  {\n")
-          .append("    \"variety\": \"regular\",\n")
-          .append("    \"tradingsymbol\": \"")
-          .append(callSymbol)
-          .append("\",\n")
-          .append("    \"exchange\": \"NFO\",\n")
-          .append("    \"transaction_type\": \"SELL\",\n")
-          .append("    \"order_type\": \"MARKET\",\n")
-          .append("    \"quantity\": ")
-          .append(quantity)
-          .append(",\n")
-          .append("    \"product\": \"NRML\",\n")
-          .append("    \"validity\": \"DAY\"\n")
-          .append("  }\n");
+      appendLeg(
+          json,
+          buildZerodhaSymbol(index, expiryDate, sellStrike, "PE"),
+          "SELL",
+          putPremium,
+          quantity);
+      json.append(",\n");
+      appendLeg(
+          json,
+          buildZerodhaSymbol(index, expiryDate, hedgeStrike, "CE"),
+          "SELL",
+          callPremium,
+          quantity);
+      json.append("\n");
     }
 
     json.append("]");
     return json.toString();
+  }
+
+  private void appendLeg(
+      final StringBuilder json,
+      final String symbol,
+      final String transactionType,
+      final BigDecimal premium,
+      final int quantity) {
+    json.append("  {\n")
+        .append("    \"variety\": \"regular\",\n")
+        .append("    \"tradingsymbol\": \"")
+        .append(symbol)
+        .append("\",\n")
+        .append("    \"exchange\": \"NFO\",\n")
+        .append("    \"transaction_type\": \"")
+        .append(transactionType)
+        .append("\",\n")
+        .append("    \"order_type\": \"LIMIT\",\n")
+        .append("    \"price\": ")
+        .append(
+            premium.compareTo(BigDecimal.ZERO) > 0
+                ? premium.setScale(0, RoundingMode.HALF_UP)
+                : BigDecimal.ZERO)
+        .append(",\n")
+        .append("    \"quantity\": ")
+        .append(quantity)
+        .append(",\n")
+        .append("    \"product\": \"NRML\",\n")
+        .append("    \"validity\": \"DAY\"\n")
+        .append("  }");
   }
 }

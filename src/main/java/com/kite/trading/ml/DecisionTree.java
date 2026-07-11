@@ -8,7 +8,7 @@ import java.util.Random;
 
 final class DecisionTree implements Serializable {
 
-  @Serial private static final long serialVersionUID = 1L;
+  @Serial private static final long serialVersionUID = 2L;
 
   private Node root;
   private final int maxDepth;
@@ -16,6 +16,9 @@ final class DecisionTree implements Serializable {
   private final int numClasses;
   private final int numFeaturesPerSplit;
   private final Random random;
+  private int totalSamples;
+
+  private transient double[] featureImportance;
 
   DecisionTree(
       int maxDepth, int minSamples, int numClasses, int numFeaturesPerSplit, Random random) {
@@ -28,11 +31,13 @@ final class DecisionTree implements Serializable {
 
   void fit(double[][] x, int[] y) {
     int n = x.length;
+    totalSamples = n;
     int[] indices = new int[n];
     for (int i = 0; i < n; i++) {
       indices[i] = i;
     }
     root = buildTree(x, y, indices, 0);
+    featureImportance = null;
   }
 
   int predict(double[] x) {
@@ -41,6 +46,64 @@ final class DecisionTree implements Serializable {
 
   double[] predictProbability(double[] x) {
     return predictProbability(root, x);
+  }
+
+  double[] computeFeatureImportances(int numFeatures) {
+    if (featureImportance != null) {
+      return featureImportance;
+    }
+    double[] imp = new double[numFeatures];
+    if (root != null) {
+      accumulateImportance(root, imp);
+    }
+    double sum = 0.0;
+    for (double v : imp) {
+      sum += v;
+    }
+    if (sum > 0.0) {
+      for (int i = 0; i < imp.length; i++) {
+        imp[i] /= sum;
+      }
+    }
+    featureImportance = imp;
+    return imp;
+  }
+
+  private void accumulateImportance(Node node, double[] imp) {
+    if (node == null || node.isLeaf()) {
+      return;
+    }
+    double giniBefore =
+        weightedGiniFromProbs(
+            node.left.probabilities, node.left.sampleCount,
+            node.right.probabilities, node.right.sampleCount);
+    double giniAfter =
+        weightedGiniFromProbs(
+            node.left.probabilities, node.left.sampleCount,
+            node.right.probabilities, node.right.sampleCount);
+    double decrease = giniBefore - giniAfter;
+    if (decrease > 0.0) {
+      imp[node.featureIndex] += decrease * node.sampleCount / totalSamples;
+    }
+    accumulateImportance(node.left, imp);
+    accumulateImportance(node.right, imp);
+  }
+
+  private double weightedGiniFromProbs(
+      double[] leftProbs, int leftCount, double[] rightProbs, int rightCount) {
+    double giniLeft = giniFromProbs(leftProbs);
+    double giniRight = giniFromProbs(rightProbs);
+    int total = leftCount + rightCount;
+    if (total == 0) return 0.0;
+    return (leftCount / (double) total) * giniLeft + (rightCount / (double) total) * giniRight;
+  }
+
+  private double giniFromProbs(double[] probs) {
+    double sumSq = 0.0;
+    for (double p : probs) {
+      sumSq += p * p;
+    }
+    return 1.0 - sumSq;
   }
 
   private Node buildTree(double[][] x, int[] y, int[] indices, int depth) {
@@ -77,6 +140,7 @@ final class DecisionTree implements Serializable {
     Node node = new Node();
     node.featureIndex = bestSplit.featureIndex;
     node.threshold = bestSplit.threshold;
+    node.sampleCount = indices.length;
     node.left = buildTree(x, y, bestSplit.left, depth + 1);
     node.right = buildTree(x, y, bestSplit.right, depth + 1);
     return node;
@@ -86,6 +150,7 @@ final class DecisionTree implements Serializable {
     Node node = new Node();
     node.probabilities = classProbabilities(y, indices);
     node.prediction = argmax(node.probabilities);
+    node.sampleCount = indices.length;
     return node;
   }
 
@@ -228,7 +293,7 @@ final class DecisionTree implements Serializable {
   }
 
   private static final class Node implements Serializable {
-    @Serial private static final long serialVersionUID = 1L;
+    @Serial private static final long serialVersionUID = 2L;
 
     int featureIndex;
     double threshold;
@@ -236,6 +301,7 @@ final class DecisionTree implements Serializable {
     Node right;
     int prediction = -1;
     double[] probabilities;
+    int sampleCount;
 
     boolean isLeaf() {
       return prediction >= 0;

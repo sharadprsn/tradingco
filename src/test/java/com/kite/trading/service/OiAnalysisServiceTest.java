@@ -254,7 +254,7 @@ class OiAnalysisServiceTest {
 
     assertNotNull(result);
     assertEquals("NEUTRAL", result.direction());
-    assertEquals("SHORT STRANGLE", result.suggestedStrategy());
+    assertEquals("SHORT IRON CONDOR", result.suggestedStrategy());
   }
 
   @Test
@@ -415,20 +415,25 @@ class OiAnalysisServiceTest {
 
   @Test
   void notifyExitIfNeeded_triggersHardStop_onPremiumDoubling() {
-    // Entry Snapshot 1
+    // Entry Snapshot 1 - add a far OTM strike (23800) near delta -0.15 for accurate strike
+    // selection
     final var peSellContract1 =
         contractWithPremium(
-            BigDecimal.valueOf(5000), BigDecimal.valueOf(100), BigDecimal.valueOf(35));
+            BigDecimal.valueOf(5000), BigDecimal.valueOf(100), BigDecimal.valueOf(18));
     final var peHedgeContract1 =
         contractWithPremium(
-            BigDecimal.valueOf(3000), BigDecimal.valueOf(50), BigDecimal.valueOf(10));
-    final var option1_1 = new OptionData(BigDecimal.valueOf(24200), null, null, peSellContract1);
-    final var option1_2 = new OptionData(BigDecimal.valueOf(24050), null, null, peHedgeContract1);
+            BigDecimal.valueOf(3000), BigDecimal.valueOf(50), BigDecimal.valueOf(8));
+    final var peOiBuildup1 =
+        contractWithPremium(
+            BigDecimal.valueOf(8000), BigDecimal.valueOf(500), BigDecimal.valueOf(35));
+    final var option1_1 = new OptionData(BigDecimal.valueOf(23800), null, null, peSellContract1);
+    final var option1_2 = new OptionData(BigDecimal.valueOf(23600), null, null, peHedgeContract1);
+    final var option1_3 = new OptionData(BigDecimal.valueOf(24200), null, null, peOiBuildup1);
     final var entryChain1 =
         new OptionChainData(
             new Records(
-                List.of("16-Jul-2026"),
-                List.of(option1_1, option1_2),
+                List.of("23-Jul-2026"),
+                List.of(option1_1, option1_2, option1_3),
                 null,
                 BigDecimal.valueOf(24250),
                 null),
@@ -437,40 +442,48 @@ class OiAnalysisServiceTest {
     // Entry Snapshot 2 (adds OI buildup to dominate, so it is BULLISH)
     final var peSellContract2 =
         contractWithPremium(
-            BigDecimal.valueOf(5500), BigDecimal.valueOf(100), BigDecimal.valueOf(35));
+            BigDecimal.valueOf(5500), BigDecimal.valueOf(100), BigDecimal.valueOf(18));
     final var peHedgeContract2 =
         contractWithPremium(
-            BigDecimal.valueOf(3100), BigDecimal.valueOf(50), BigDecimal.valueOf(10));
-    final var option2_1 = new OptionData(BigDecimal.valueOf(24200), null, null, peSellContract2);
-    final var option2_2 = new OptionData(BigDecimal.valueOf(24050), null, null, peHedgeContract2);
+            BigDecimal.valueOf(3100), BigDecimal.valueOf(50), BigDecimal.valueOf(8));
+    final var peOiBuildup2 =
+        contractWithPremium(
+            BigDecimal.valueOf(8500), BigDecimal.valueOf(500), BigDecimal.valueOf(35));
+    final var option2_1 = new OptionData(BigDecimal.valueOf(23800), null, null, peSellContract2);
+    final var option2_2 = new OptionData(BigDecimal.valueOf(23600), null, null, peHedgeContract2);
+    final var option2_3 = new OptionData(BigDecimal.valueOf(24200), null, null, peOiBuildup2);
     final var entryChain2 =
         new OptionChainData(
             new Records(
-                List.of("16-Jul-2026"),
-                List.of(option2_1, option2_2),
+                List.of("23-Jul-2026"),
+                List.of(option2_1, option2_2, option2_3),
                 null,
                 BigDecimal.valueOf(24250),
                 null),
             null);
 
-    // Exit Snapshot (premium doubles to 80)
+    // Exit Snapshot (premium doubles to 40, underlying drops to test strike breach + hard stop)
     final var peSellExitContract =
         contractWithPremium(
-            BigDecimal.valueOf(5500), BigDecimal.valueOf(100), BigDecimal.valueOf(80));
+            BigDecimal.valueOf(5500), BigDecimal.valueOf(100), BigDecimal.valueOf(40));
     final var peHedgeExitContract =
         contractWithPremium(
-            BigDecimal.valueOf(3100), BigDecimal.valueOf(50), BigDecimal.valueOf(10));
+            BigDecimal.valueOf(3100), BigDecimal.valueOf(50), BigDecimal.valueOf(14));
+    final var peOiBuildupExit =
+        contractWithPremium(
+            BigDecimal.valueOf(8500), BigDecimal.valueOf(500), BigDecimal.valueOf(35));
     final var exitOption1 =
-        new OptionData(BigDecimal.valueOf(24200), null, null, peSellExitContract);
+        new OptionData(BigDecimal.valueOf(23800), null, null, peSellExitContract);
     final var exitOption2 =
-        new OptionData(BigDecimal.valueOf(24050), null, null, peHedgeExitContract);
+        new OptionData(BigDecimal.valueOf(23600), null, null, peHedgeExitContract);
+    final var exitOption3 = new OptionData(BigDecimal.valueOf(24200), null, null, peOiBuildupExit);
     final var exitChain =
         new OptionChainData(
             new Records(
-                List.of("16-Jul-2026"),
-                List.of(exitOption1, exitOption2),
+                List.of("23-Jul-2026"),
+                List.of(exitOption1, exitOption2, exitOption3),
                 null,
-                BigDecimal.valueOf(24100),
+                BigDecimal.valueOf(23700),
                 null),
             null);
 
@@ -504,7 +517,7 @@ class OiAnalysisServiceTest {
     final var entryChain1 =
         new OptionChainData(
             new Records(
-                List.of("16-Jul-2026"),
+                List.of("23-Jul-2026"),
                 List.of(option1_1, option1_2),
                 null,
                 BigDecimal.valueOf(24250),
@@ -523,7 +536,7 @@ class OiAnalysisServiceTest {
     final var entryChain2 =
         new OptionChainData(
             new Records(
-                List.of("16-Jul-2026"),
+                List.of("23-Jul-2026"),
                 List.of(option2_1, option2_2),
                 null,
                 BigDecimal.valueOf(24250),
@@ -544,7 +557,7 @@ class OiAnalysisServiceTest {
     final var exitChain =
         new OptionChainData(
             new Records(
-                List.of("16-Jul-2026"),
+                List.of("23-Jul-2026"),
                 List.of(exitOption1, exitOption2),
                 null,
                 BigDecimal.valueOf(24350),

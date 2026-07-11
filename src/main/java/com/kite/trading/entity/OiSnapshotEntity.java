@@ -9,6 +9,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.List;
 
 @Entity
 @Table(name = "oi_snapshots")
@@ -207,5 +208,21 @@ public class OiSnapshotEntity {
 
   public BigDecimal getMarketSentiment() {
     return marketSentiment;
+  }
+
+  public OiDataSnapshot toSnapshot() {
+    return new OiDataSnapshot(
+        timestamp,
+        underlyingValue,
+        totalPeOi,
+        totalCeOi,
+        totalPeOiChange,
+        totalCeOiChange,
+        pcr,
+        List.of(),
+        largestPeOiStrike,
+        largestCeOiStrike,
+        List.of(),
+        marketSentiment);
   }
 }

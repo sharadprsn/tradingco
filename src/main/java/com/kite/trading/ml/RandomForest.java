@@ -8,11 +8,12 @@ import java.util.Random;
 
 final class RandomForest implements Serializable {
 
-  @Serial private static final long serialVersionUID = 1L;
+  @Serial private static final long serialVersionUID = 2L;
 
   private final List<DecisionTree> trees;
   private final int numClasses;
   private final int numFeatures;
+  private transient double[] featureImportance;
 
   RandomForest(
       int numTrees, int maxDepth, int minSamples, int numClasses, int numFeatures, Random random) {
@@ -43,6 +44,7 @@ final class RandomForest implements Serializable {
       }
       tree.fit(bootstrapX, bootstrapY);
     }
+    computeFeatureImportance();
   }
 
   int predict(double[] x) {
@@ -67,7 +69,45 @@ final class RandomForest implements Serializable {
     return probs;
   }
 
+  double[] getFeatureImportances() {
+    return featureImportance;
+  }
+
+  void computeFeatureImportance() {
+    double[] imp = new double[numFeatures];
+    for (DecisionTree tree : trees) {
+      double[] treeImp = tree.computeFeatureImportances(numFeatures);
+      for (int i = 0; i < numFeatures; i++) {
+        imp[i] += treeImp[i];
+      }
+    }
+    double sum = 0.0;
+    for (double v : imp) {
+      sum += v;
+    }
+    if (sum > 0.0) {
+      for (int i = 0; i < numFeatures; i++) {
+        imp[i] /= sum;
+      }
+    }
+    this.featureImportance = imp;
+  }
+
+  int getNumFeatures() {
+    return numFeatures;
+  }
+
   private static int argmax(int[] arr) {
+    int best = 0;
+    for (int i = 1; i < arr.length; i++) {
+      if (arr[i] > arr[best]) {
+        best = i;
+      }
+    }
+    return best;
+  }
+
+  private static int argmax(double[] arr) {
     int best = 0;
     for (int i = 1; i < arr.length; i++) {
       if (arr[i] > arr[best]) {
