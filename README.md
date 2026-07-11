@@ -1,6 +1,6 @@
 # Kite Trading — OI-Based Intraday Monitor (Nifty & Sensex)
 
-A Spring Boot application that monitors NSE Nifty/Sensex option chain data in real time, computes Put-Call Ratio (PCR) and Open Interest (OI) buildup, predicts intraday direction at 9:45 AM, auto-enters a credit spread / short strangle at 9:50 AM, and monitors positions with a multi-layered exit strategy — all via Telegram. Data is persisted to an embedded H2 database for optional LSTM model training.
+A Spring Boot application that monitors NSE Nifty/Sensex option chain data in real time, computes Put-Call Ratio (PCR) and Open Interest (OI) buildup, predicts intraday direction at 9:45 AM, auto-enters a credit spread / short strangle at 9:50 AM, and monitors positions with a multi-layered exit strategy — all via Telegram. Data is persisted to an embedded H2 database and used by an in-process RandomForest ML model for direction prediction.
 
 ## Features
 
@@ -12,10 +12,10 @@ A Spring Boot application that monitors NSE Nifty/Sensex option chain data in re
 - **Multi-Layer Exit Strategy** — Hard stop (2× premium), trailing stop (0.5% pullback), profit target (80% decay), PCR shift, direction reversal, SuperTrend, OI surge, strike breach, time square-off (3:10 PM)
 - **H2 Database Persistence** — All snapshots persisted with VIX + index OHLC, stored on host in `./data/`
 - **CSV Data Export** — REST endpoint for ML training data download
-- **LSTM Sidecar (optional)** — Python FastAPI sidecar for deep learning direction prediction; auto-trains daily at 4 PM
+- **In-Process ML Model** — RandomForest (200 trees) trained daily at 4 PM from persisted snapshot data; predicts direction + confidence
 - **Telegram Notifications** — 9:45 AM prediction, OI updates (threshold-gated), exit alerts, direction changes, training results
 - **Startup Health Check** — Verifies NSE connectivity and Telegram bot on startup
-- **Docker** — Multi-stage build, JRE Alpine, non-root user, health check, sidecar container
+- **Docker** — Multi-stage build, JRE Alpine, non-root user, health check
 
 ## Prerequisites
 
@@ -79,9 +79,6 @@ src/main/java/com/kite/trading/
 │   ├── OiAnalysisResult.java            # Prediction result + trade recommendation
 │   ├── OptionChainData.java             # NSE API response DTO
 │   ├── IndexQuote.java                  # Index OHLC quote
-│   ├── LstmPredictionRequest.java       # LSTM sidecar request DTO
-│   ├── LstmPredictionResponse.java      # LSTM sidecar response DTO
-│   └── LstmTrainResponse.java           # LSTM training result DTO
 ├── entity/
 │   └── OiSnapshotEntity.java            # JPA entity for H2 persistence
 ├── repository/
@@ -91,26 +88,19 @@ src/main/java/com/kite/trading/
 ├── exception/
 │   └── GlobalExceptionHandler.java      # REST error handling
 └── service/
-    ├── OiAnalysisService.java           # Core OI analysis engine + H2 persist + LSTM integration
+    ├── OiAnalysisService.java           # Core OI analysis engine + H2 persist + ML integration
     ├── NseOptionChainClient.java        # NSE API client (primary)
     ├── YahooFinanceOptionChainClient.java  # Fallback option chain client
     ├── FallbackOptionChainClient.java    # @Primary orchestrator with retry
     ├── TelegramService.java             # Telegram messaging
-    ├── LstmPredictionClient.java        # HTTP client to Python ML sidecar
+    ├── ml/
+    │   ├── DecisionTree.java            # CART classifier (from scratch)
+    │   ├── RandomForest.java            # 200-tree ensemble (from scratch)
+    │   ├── FeatureEngineering.java      # 16 technical features
+    │   ├── SentimentAnalyzer.java       # Keyword-based RSS sentiment
+    │   └── MlService.java              # @Service facade for train/predict/sentiment
     └── ZerodhaApiClient.java            # Kite trade API (order/quote)
 ```
-
-```
-ml-sidecar/                              # Python LSTM sidecar (optional)
-├── main.py                              # FastAPI app (predict / train / health)
-├── features.py                          # Feature engineering + label generation
-├── train.py                             # LSTM model training + ONNX export
-├── requirements.txt
-├── Dockerfile
-└── .dockerignore
-```
-
-### Data Flow
 
 ```
 NSE API ──► NseOptionChainClient ──► OiAnalysisService ──► TelegramService
@@ -119,12 +109,12 @@ NSE API ──► NseOptionChainClient ──► OiAnalysisService ──► Tel
                                         ├─ H2 persistence         ├─ OI updates
                                         ├─ direction prediction   ├─ exit alerts
                                         ├─ exit signal check      ├─ direction changes
-                                        └─ LSTM sidecar call      └─ training results
+                                        └─ MlService.inject()     └─ training results
                                               │
                                               ▼
-                                        ml-sidecar (Python)
-                                        POST /predict → direction + confidence
-                                        POST /train   → retrain from H2 data
+                                        RandomForest (in-process)
+                                        200 trees, 16 features
+                                        predict() + train()
 ```
 
 ## Telegram Messages
@@ -138,7 +128,7 @@ NSE API ──► NseOptionChainClient ──► OiAnalysisService ──► Tel
 | **Exit Signal** | Reason (HARD STOP / PROFIT TARGET / PCR SHIFT / DIRECTION REVERSAL / SUPERTREND / TIME SQOFF), confidence, exit fraction |
 | **Early Warning** | Pre-confirmation alert when OI-based signal first detected |
 | **Market Close** (4 PM) | Summary: 9:45 vs 3:30 index levels + movement |
-| **LSTM Training** (4 PM) | Model retrained: accuracy, samples (only when enabled) |
+| **ML Training** (4 PM) | Model retrained: OOB score, samples |
 
 ### Thresholds (noise reduction)
 
@@ -157,7 +147,7 @@ NSE API ──► NseOptionChainClient ──► OiAnalysisService ──► Tel
 | 9:50 AM | `markPositionEntered()` → auto-entry trigger |
 | 9:50 AM – 3:30 PM | OI snapshots + direction change checks + exit monitoring every 6 minutes |
 | 3:10 PM | Time-based square-off guard (inside exit assessment) |
-| 4:00 PM | Market close summary + LSTM training trigger |
+| 4:00 PM | Market close summary + ML training trigger |
 | Weekends | `shouldRun()` returns `false`, no activity |
 
 ## API Endpoints
@@ -184,8 +174,8 @@ NSE API ──► NseOptionChainClient ──► OiAnalysisService ──► Tel
 | `KITE_API_SECRET` | Yes | — | Zerodha API secret |
 | `TELEGRAM_BOT_TOKEN` | Yes | — | Telegram bot token (from @BotFather) |
 | `TELEGRAM_CHAT_ID` | Yes | — | Target chat/group ID |
-| `ML_SIDECAR_ENABLED` | No | `false` | Enable LSTM sidecar integration |
-| `ML_SIDECAR_URL` | No | `http://ml-sidecar:8000` | LSTM sidecar base URL |
+| `ML_ENABLED` | No | `true` | Enable in-process ML model (RandomForest + sentiment) |
+| `ML_MODEL_PATH` | No | `./data/model.rf` | RandomForest model file path |
 | `NSE_OPTION_CHAIN_URL` | No | `https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY` | NSE API URL |
 | `NSE_HOME_URL` | No | `https://www.nseindia.com` | NSE homepage (for cookie) |
 | `KITE_BASE_URL` | No | `https://api.kite.trade` | Kite REST API base |
@@ -216,15 +206,12 @@ docker compose up --build
 
 # Build image manually
 docker build -t sharadprsn/kite-trading:latest .
-docker build -t sharadprsn/ml-sidecar:latest ./ml-sidecar
-
 # Tag for your registry
 docker tag kite-trading:latest sharadprsn/kite-trading:latest
 docker tag kite-trading:latest sharadprsn/kite-trading:1.0.0
 
 # Push to registry
 docker push sharadprsn/kite-trading:latest
-docker push sharadprsn/ml-sidecar:latest
 docker push sharadprsn/kite-trading:1.0.0
 
 # Run from registry (after push)
@@ -251,65 +238,7 @@ docker run -d --name kite-trading -p 443:443 --env-file .env sharadprsn/kite-tra
 - Structured logging via SLF4J
 - No `var` keyword, no heavy dependencies without explicit need
 
-<details>
-<summary><span style="color: red; font-weight: bold;">⚠️  FUTURE STEPS — Activate LSTM Model (click to expand)</span></summary>
 
-<br>
-
-Follow these steps **in order** after the app has been running for a few weeks.
-
-### Step 1: Wait for data (2–4 weeks)
-Snapshots are persisted to H2 every 6 minutes. Need **2000+ snapshots** (~2 weeks).
-
-```bash
-curl http://localhost:443/api/v1/data/stats
-```
-Target: `Total snapshots: 2000+`
-
-### Step 2: Train the model for the first time
-```bash
-curl -X POST http://ml-sidecar:8000/train
-```
-
-<span style="color: green">Success:</span>
-```json
-{"status": "success", "val_accuracy": 0.62, ...}
-```
-
-<span style="color: red">Still waiting:</span>
-```json
-{"status": "skipped", "reason": "Insufficient data: ..."}
-```
-
-### Step 3: Verify model loaded
-```bash
-curl http://ml-sidecar:8000/health
-```
-Look for `"model_loaded": true`
-
-### Step 4: Enable LSTM in production
-```env
-ML_SIDECAR_ENABLED=true
-```
-```bash
-docker compose up -d
-```
-
-### Step 5: Confirm it's working
-Check logs for `LSTM overrides (BULLISH, 82.3%)`.
-
-At 4 PM you'll get a Telegram: `LSTM model retrained: accuracy=62.0%, samples=340`
-
-### Troubleshooting
-
-| Symptom | Fix |
-|---------|-----|
-| `/predict` returns 503 | Run Step 2 first |
-| `/train` returns `skipped` | Check `/api/v1/data/stats` — need more data |
-| Telegram says `error` | `docker logs ml-sidecar` |
-| LSTM never overrides | Its confidence < rules — normal when model is weak |
-
-</details>
 
 ## oiAnalysisService Constants
 

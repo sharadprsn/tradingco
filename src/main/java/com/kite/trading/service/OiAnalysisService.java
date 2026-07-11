@@ -4,15 +4,14 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kite.trading.dto.IndexQuote;
 import com.kite.trading.dto.IndexQuote.IndexData;
-import com.kite.trading.dto.LstmPredictionResponse;
 import com.kite.trading.dto.OiAnalysisResult;
 import com.kite.trading.dto.OiDataSnapshot;
 import com.kite.trading.dto.OiDataSnapshot.OiStrikeInfo;
 import com.kite.trading.dto.OptionChainData;
 import com.kite.trading.dto.OptionChainData.OptionData;
 import com.kite.trading.entity.OiSnapshotEntity;
+import com.kite.trading.ml.MlService;
 import com.kite.trading.repository.OiSnapshotRepository;
-import com.kite.trading.service.SentimentClient.SentimentResult;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Clock;
@@ -89,8 +88,7 @@ public class OiAnalysisService {
   private final TelegramService telegramService;
   private final OiSnapshotRepository snapshotRepository;
   private final ObjectMapper objectMapper;
-  private final LstmPredictionClient lstmClient;
-  private final SentimentClient sentimentClient;
+  private final MlService mlService;
   private final Clock clock;
 
   private final List<OiDataSnapshot> snapshots = new CopyOnWriteArrayList<>();
@@ -156,15 +154,13 @@ public class OiAnalysisService {
       final TelegramService telegramService,
       final OiSnapshotRepository snapshotRepository,
       final ObjectMapper objectMapper,
-      final LstmPredictionClient lstmClient,
-      final SentimentClient sentimentClient) {
+      final MlService mlService) {
     this(
         optionChainClient,
         telegramService,
         snapshotRepository,
         objectMapper,
-        lstmClient,
-        sentimentClient,
+        mlService,
         Clock.system(IST));
   }
 
@@ -173,15 +169,13 @@ public class OiAnalysisService {
       final TelegramService telegramService,
       final OiSnapshotRepository snapshotRepository,
       final ObjectMapper objectMapper,
-      final LstmPredictionClient lstmClient,
-      final SentimentClient sentimentClient,
+      final MlService mlService,
       final Clock clock) {
     this.optionChainClient = optionChainClient;
     this.telegramService = telegramService;
     this.snapshotRepository = snapshotRepository;
     this.objectMapper = objectMapper;
-    this.lstmClient = lstmClient;
-    this.sentimentClient = sentimentClient;
+    this.mlService = mlService;
     this.clock = clock;
   }
 
@@ -304,8 +298,9 @@ public class OiAnalysisService {
             ? buildUpList.subList(0, TOP_STRIKES_COUNT)
             : buildUpList;
 
-    final SentimentResult sentiment = sentimentClient.getSentiment();
-    final BigDecimal marketSentimentVal = sentiment != null ? sentiment.score() : BigDecimal.ZERO;
+    final MlService.SentimentResult sentiment = mlService.getSentiment();
+    final BigDecimal marketSentimentVal =
+        sentiment != null ? BigDecimal.valueOf(sentiment.score()) : BigDecimal.ZERO;
 
     final OiDataSnapshot snapshot =
         new OiDataSnapshot(
@@ -487,29 +482,29 @@ public class OiAnalysisService {
       finalConfidence = BigDecimal.ZERO;
     }
 
-    if (lstmClient.isEnabled() && !"NO_TRADE".equals(strategy)) {
-      final LstmPredictionResponse lstmResult = lstmClient.predict(snapshots);
-      if (lstmResult != null) {
-        final BigDecimal lstmConfidence = BigDecimal.valueOf(lstmResult.confidence() * 100);
-        if (lstmConfidence.compareTo(finalConfidence) > 0) {
+    if (mlService.isModelLoaded() && !"NO_TRADE".equals(strategy)) {
+      final MlService.PredictResult mlResult = mlService.predict(snapshots);
+      if (mlResult != null) {
+        final BigDecimal mlConfidence = BigDecimal.valueOf(mlResult.confidence() * 100);
+        if (mlConfidence.compareTo(finalConfidence) > 0) {
           reasoning
-              .append("LSTM overrides (")
-              .append(lstmResult.direction())
+              .append("ML overrides (")
+              .append(mlResult.direction())
               .append(", ")
-              .append(lstmConfidence.setScale(1, RoundingMode.HALF_UP))
+              .append(mlConfidence.setScale(1, RoundingMode.HALF_UP))
               .append("%). ");
-          finalDirection = lstmResult.direction();
-          finalConfidence = lstmConfidence;
+          finalDirection = mlResult.direction();
+          finalConfidence = mlConfidence;
         } else {
           reasoning
               .append("Rules prevail (")
               .append(finalDirection)
               .append(", ")
               .append(finalConfidence.setScale(1, RoundingMode.HALF_UP))
-              .append("%) over LSTM (")
-              .append(lstmResult.direction())
+              .append("%) over ML (")
+              .append(mlResult.direction())
               .append(", ")
-              .append(lstmConfidence.setScale(1, RoundingMode.HALF_UP))
+              .append(mlConfidence.setScale(1, RoundingMode.HALF_UP))
               .append("%). ");
         }
       }

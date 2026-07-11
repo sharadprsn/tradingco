@@ -1,8 +1,7 @@
 package com.kite.trading.scheduler;
 
-import com.kite.trading.dto.LstmTrainResponse;
 import com.kite.trading.dto.OiDataSnapshot;
-import com.kite.trading.service.LstmPredictionClient;
+import com.kite.trading.ml.MlService;
 import com.kite.trading.service.OiAnalysisService;
 import com.kite.trading.service.TelegramService;
 import java.math.BigDecimal;
@@ -28,7 +27,7 @@ public class IntradayOiScheduler {
 
   private final OiAnalysisService oiAnalysisService;
   private final TelegramService telegramService;
-  private final LstmPredictionClient lstmClient;
+  private final MlService mlService;
 
   private volatile boolean prediction945Executed;
   private volatile boolean autoEntryExecutedToday;
@@ -38,10 +37,10 @@ public class IntradayOiScheduler {
   public IntradayOiScheduler(
       final OiAnalysisService oiAnalysisService,
       final TelegramService telegramService,
-      final LstmPredictionClient lstmClient) {
+      final MlService mlService) {
     this.oiAnalysisService = oiAnalysisService;
     this.telegramService = telegramService;
-    this.lstmClient = lstmClient;
+    this.mlService = mlService;
   }
 
   @Scheduled(fixedRate = SIX_MINUTES_MS, initialDelay = 5_000)
@@ -119,15 +118,12 @@ public class IntradayOiScheduler {
       telegramService.sendMessage(summary);
     }
 
-    final LstmTrainResponse trainResult = lstmClient.triggerTraining();
+    final MlService.TrainResult trainResult = mlService.train(snapshots);
     if (trainResult != null && "success".equals(trainResult.status())) {
       telegramService.sendMessage(
-          "LSTM model retrained: accuracy="
-              + String.format("%.1f", trainResult.valAccuracy() * 100)
-              + "%, samples="
-              + trainResult.samples());
+          "ML model retrained: accuracy=N/A, samples=" + trainResult.samples());
     } else if (trainResult != null && "skipped".equals(trainResult.status())) {
-      logger.info("LSTM training skipped: {}", trainResult.reason());
+      logger.info("ML training skipped: {}", trainResult.reason());
     }
 
     oiAnalysisService.reset();

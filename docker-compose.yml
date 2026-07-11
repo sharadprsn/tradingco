@@ -14,29 +14,14 @@ services:
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
       - TELEGRAM_BASE_URL=${TELEGRAM_BASE_URL:-https://api.telegram.org}
       - APP_BASE_URL=${APP_BASE_URL:-https://80.225.215.99:443}
-      - ML_SIDECAR_ENABLED=${ML_SIDECAR_ENABLED:-false}
+      - ML_ENABLED=${ML_ENABLED:-true}
     volumes:
       - ./logs:/app/logs
       - ./data:/app/data
     restart: unless-stopped
-    depends_on:
-      ml-sidecar:
-        condition: service_started
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:443/actuator/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 30s
-
-  ml-sidecar:
-    image: sharadprsn/ml-sidecar:latest
-    container_name: ml-sidecar
-    ports:
-      - "8000:8000"
-    environment:
-      - JAVA_APP_URL=http://kite-trading:443
-      - TRAIN_TIMEOUT_S=300
-    volumes:
-      - ./data:/app/data
-    restart: unless-stopped

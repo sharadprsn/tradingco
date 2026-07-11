@@ -12,6 +12,7 @@ import com.kite.trading.dto.OptionChainData;
 import com.kite.trading.dto.OptionChainData.OptionContract;
 import com.kite.trading.dto.OptionChainData.OptionData;
 import com.kite.trading.dto.OptionChainData.Records;
+import com.kite.trading.ml.MlService;
 import com.kite.trading.repository.OiSnapshotRepository;
 import java.math.BigDecimal;
 import java.time.Clock;
@@ -35,9 +36,7 @@ class OiAnalysisServiceTest {
 
   @Mock private OiSnapshotRepository snapshotRepository;
 
-  @Mock private LstmPredictionClient lstmClient;
-
-  @Mock private SentimentClient sentimentClient;
+  @Mock private MlService mlService;
 
   private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -48,18 +47,11 @@ class OiAnalysisServiceTest {
     final Clock morningClock =
         Clock.fixed(Instant.parse("2026-07-16T04:30:00Z"), ZoneId.of("Asia/Kolkata"));
     lenient()
-        .when(sentimentClient.getSentiment())
-        .thenReturn(
-            new SentimentClient.SentimentResult(BigDecimal.ZERO, "neutral", List.of(), false));
+        .when(mlService.getSentiment())
+        .thenReturn(new MlService.SentimentResult(0.0, "neutral"));
     service =
         new OiAnalysisService(
-            nseClient,
-            telegramService,
-            snapshotRepository,
-            objectMapper,
-            lstmClient,
-            sentimentClient,
-            morningClock);
+            nseClient, telegramService, snapshotRepository, objectMapper, mlService, morningClock);
   }
 
   @Test
@@ -597,13 +589,7 @@ class OiAnalysisServiceTest {
         Clock.fixed(Instant.parse("2026-07-16T09:45:00Z"), ZoneId.of("Asia/Kolkata"));
     final OiAnalysisService serviceWithFixedClock =
         new OiAnalysisService(
-            nseClient,
-            telegramService,
-            snapshotRepository,
-            objectMapper,
-            lstmClient,
-            sentimentClient,
-            fixedClock);
+            nseClient, telegramService, snapshotRepository, objectMapper, mlService, fixedClock);
 
     final var peSellContract =
         contractWithPremium(
