@@ -1,19 +1,25 @@
-FROM python:3.11-slim
+FROM python:3.11-alpine
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgomp1 \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache libgfortran libgomp
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt && \
+    rm -rf /usr/local/lib/python3.11/site-packages/pip* \
+           /usr/local/lib/python3.11/site-packages/setuptools* \
+           /usr/local/lib/python3.11/site-packages/wheel* \
+           /usr/local/lib/python3.11/ensurepip \
+           /usr/local/bin/pip* \
+           /usr/local/bin/python3.11-config
 
 RUN python -c "import nltk; nltk.download('vader_lexicon')"
 
 COPY main.py features.py train.py sentiment.py .
 
 RUN mkdir -p /app/models
+
+ENV OMP_NUM_THREADS=1
 
 EXPOSE 8000
 

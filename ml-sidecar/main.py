@@ -3,6 +3,7 @@
 import io
 import logging
 import os
+from datetime import datetime, timedelta
 
 import httpx
 import joblib
@@ -86,9 +87,11 @@ def _load_model():
 
 def _snapshots_to_dataframe(snapshots: list[dict]) -> pd.DataFrame:
     records = []
+    now = datetime.now()
     for i, snap in enumerate(snapshots):
+        ts = now - timedelta(minutes=(len(snapshots) - 1 - i) * 6)
         records.append({
-            "timestamp": f"T{i}",
+            "timestamp": ts.isoformat(),
             "underlyingValue": snap["underlyingValue"],
             "totalPeOi": snap["totalPeOi"],
             "totalCeOi": snap["totalCeOi"],
