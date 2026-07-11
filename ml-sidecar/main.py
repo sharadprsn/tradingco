@@ -1,12 +1,12 @@
-"""FastAPI sidecar for LSTM-based direction prediction + daily retraining."""
+"""FastAPI sidecar for Random Forest direction prediction + daily retraining."""
 
 import io
 import logging
 import os
 
 import httpx
+import joblib
 import numpy as np
-import onnxruntime as ort
 import pandas as pd
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -18,13 +18,13 @@ from train import train, MODEL_PATH
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="LSTM Direction Predictor", version="1.0.0")
+app = FastAPI(title="Direction Predictor", version="1.0.0")
 
 JAVA_APP_URL = os.environ.get("JAVA_APP_URL", "http://kite-trading:443")
 JAVA_CSV_URL = f"{JAVA_APP_URL}/api/v1/data/export/csv"
 TRAIN_TIMEOUT_S = int(os.environ.get("TRAIN_TIMEOUT_S", "300"))
 
-session = None
+model = None
 _model_lock = False
 
 
@@ -71,17 +71,17 @@ class SentimentResponse(BaseModel):
 
 
 def _load_model():
-    global session
+    global model
     if not os.path.exists(MODEL_PATH):
         logger.warning("No model found at %s", MODEL_PATH)
-        session = None
+        model = None
         return
     try:
-        session = ort.InferenceSession(MODEL_PATH)
+        model = joblib.load(MODEL_PATH)
         logger.info("Model loaded from %s", MODEL_PATH)
     except Exception as e:
         logger.error("Failed to load model: %s", e)
-        session = None
+        model = None
 
 
 def _snapshots_to_dataframe(snapshots: list[dict]) -> pd.DataFrame:
@@ -114,7 +114,7 @@ def startup():
 
 @app.get("/health")
 def health():
-    return {"model_loaded": session is not None, "model_path": MODEL_PATH}
+    return {"model_loaded": model is not None, "model_path": MODEL_PATH}
 
 
 @app.get("/sentiment", response_model=SentimentResponse)
@@ -125,7 +125,7 @@ def sentiment(force_refresh: bool = False):
 
 @app.post("/predict", response_model=PredictResponse)
 def predict(req: PredictRequest):
-    if session is None:
+    if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded. Train first via /train")
 
     snap_dicts = [s.model_dump() for s in req.snapshots]
@@ -140,10 +140,12 @@ def predict(req: PredictRequest):
     if seq is None:
         raise HTTPException(status_code=400, detail="Failed to build feature sequence")
 
-    input_name = session.get_inputs()[0].name
-    probs = session.run(None, {input_name: seq})[0][0]
+    seq_flat = seq.reshape(1, -1)
+    proba = model.predict_proba(seq_flat)[0]
+    # proba order matches sorted classes: 0=BULLISH, 1=BEARISH, 2=NEUTRAL
+    probs = [float(proba[0]), float(proba[1]), float(proba[2])]
     label_idx = int(np.argmax(probs))
-    confidence = float(probs[label_idx])
+    confidence = probs[label_idx]
     direction = ["BULLISH", "BEARISH", "NEUTRAL"][label_idx]
 
     return PredictResponse(

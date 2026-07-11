@@ -224,6 +224,7 @@ docker tag kite-trading:latest sharadprsn/kite-trading:1.0.0
 
 # Push to registry
 docker push sharadprsn/kite-trading:latest
+docker push sharadprsn/ml-sidecar:latest
 docker push sharadprsn/kite-trading:1.0.0
 
 # Run from registry (after push)

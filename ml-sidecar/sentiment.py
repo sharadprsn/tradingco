@@ -1,18 +1,15 @@
-"""Market sentiment analysis using FinBERT on financial news RSS feeds."""
+"""Market sentiment analysis using VADER on financial news RSS feeds."""
 
 import logging
-import os
 import re
 import time
 from typing import Any
 
 import feedparser
 import numpy as np
-from transformers import AutoTokenizer, TFAutoModelForSequenceClassification
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
 
 logger = logging.getLogger(__name__)
-
-MODEL_NAME = "ProsusAI/finbert"
 
 RSS_FEEDS = [
     "https://news.google.com/rss/search?q=Nifty+Sensex+stock+market&hl=en-IN&gl=IN&ceid=IN:en",
@@ -20,19 +17,17 @@ RSS_FEEDS = [
     "https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms",
 ]
 
-_tokenizer: Any = None
-_model: Any = None
+_analyzer: SentimentIntensityAnalyzer | None = None
 _cache: dict[str, Any] = {"score": 0.0, "label": "neutral", "headlines": [], "timestamp": 0.0}
 _CACHE_TTL_SECONDS = 300
 
 
-def _load_model() -> None:
-    global _tokenizer, _model
-    if _tokenizer is None or _model is None:
-        logger.info("Loading FinBERT model: %s", MODEL_NAME)
-        _tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-        _model = TFAutoModelForSequenceClassification.from_pretrained(MODEL_NAME)
-        logger.info("FinBERT model loaded")
+def _load_analyzer() -> None:
+    global _analyzer
+    if _analyzer is None:
+        logger.info("Loading VADER sentiment analyzer")
+        _analyzer = SentimentIntensityAnalyzer()
+        logger.info("VADER analyzer loaded")
 
 
 def _fetch_headlines() -> list[str]:
@@ -63,41 +58,24 @@ def _analyze(headlines: list[str]) -> tuple[float, str]:
     if not headlines:
         return 0.0, "neutral"
 
-    _load_model()
+    _load_analyzer()
 
     try:
-        inputs = _tokenizer(
-            headlines,
-            padding=True,
-            truncation=True,
-            return_tensors="tf",
-            max_length=128,
-        )
-        outputs = _model(inputs)
-        import tensorflow as tf
+        scores = [_analyzer.polarity_scores(h)["compound"] for h in headlines]
+        avg_score = float(np.mean(scores)) if scores else 0.0
 
-        probs = tf.nn.softmax(outputs.logits, axis=-1).numpy()
-
-        avg_scores = np.mean(probs, axis=0)
-        positive, negative, neutral = float(avg_scores[0]), float(avg_scores[1]), float(avg_scores[2])
-        score = positive - negative
-
-        if score > 0.15:
+        if avg_score > 0.15:
             label = "bullish"
-        elif score < -0.15:
+        elif avg_score < -0.15:
             label = "bearish"
         else:
             label = "neutral"
 
         logger.info(
-            "Sentiment: score=%.4f, label=%s (pos=%.4f, neg=%.4f, neu=%.4f)",
-            score,
-            label,
-            positive,
-            negative,
-            neutral,
+            "Sentiment: score=%.4f, label=%s (headlines=%d)",
+            avg_score, label, len(headlines),
         )
-        return score, label
+        return avg_score, label
     except Exception as e:
         logger.error("Sentiment analysis failed: %s", e)
         return 0.0, "neutral"
