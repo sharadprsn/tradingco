@@ -64,7 +64,8 @@ public class LstmPredictionClient {
                 null,
                 null,
                 null,
-                null));
+                null,
+                s.marketSentiment() != null ? s.marketSentiment() : BigDecimal.ZERO));
       }
 
       final LstmPredictionRequest request = new LstmPredictionRequest(lstmSnapshots);

@@ -37,6 +37,8 @@ class OiAnalysisServiceTest {
 
   @Mock private LstmPredictionClient lstmClient;
 
+  @Mock private SentimentClient sentimentClient;
+
   private final ObjectMapper objectMapper = new ObjectMapper();
 
   private OiAnalysisService service;
@@ -45,9 +47,19 @@ class OiAnalysisServiceTest {
   void setUp() {
     final Clock morningClock =
         Clock.fixed(Instant.parse("2026-07-16T04:30:00Z"), ZoneId.of("Asia/Kolkata"));
+    lenient()
+        .when(sentimentClient.getSentiment())
+        .thenReturn(
+            new SentimentClient.SentimentResult(BigDecimal.ZERO, "neutral", List.of(), false));
     service =
         new OiAnalysisService(
-            nseClient, telegramService, snapshotRepository, objectMapper, lstmClient, morningClock);
+            nseClient,
+            telegramService,
+            snapshotRepository,
+            objectMapper,
+            lstmClient,
+            sentimentClient,
+            morningClock);
   }
 
   @Test
@@ -585,7 +597,13 @@ class OiAnalysisServiceTest {
         Clock.fixed(Instant.parse("2026-07-16T09:45:00Z"), ZoneId.of("Asia/Kolkata"));
     final OiAnalysisService serviceWithFixedClock =
         new OiAnalysisService(
-            nseClient, telegramService, snapshotRepository, objectMapper, lstmClient, fixedClock);
+            nseClient,
+            telegramService,
+            snapshotRepository,
+            objectMapper,
+            lstmClient,
+            sentimentClient,
+            fixedClock);
 
     final var peSellContract =
         contractWithPremium(

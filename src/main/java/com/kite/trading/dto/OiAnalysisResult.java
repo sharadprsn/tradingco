@@ -15,10 +15,41 @@ public record OiAnalysisResult(
     @JsonProperty("vix") BigDecimal vix,
     @JsonProperty("indexOpen") BigDecimal indexOpen,
     @JsonProperty("largestPeOiStrike") BigDecimal largestPeOiStrike,
-    @JsonProperty("largestCeOiStrike") BigDecimal largestCeOiStrike) {
+    @JsonProperty("largestCeOiStrike") BigDecimal largestCeOiStrike,
+    @JsonProperty("marketSentiment") BigDecimal marketSentiment) {
+  public OiAnalysisResult(
+      String direction,
+      BigDecimal confidence,
+      BigDecimal pcr,
+      String suggestedStrategy,
+      List<BigDecimal> suggestedStrikes,
+      String reasoning,
+      String tradeRecommendation,
+      BigDecimal vix,
+      BigDecimal indexOpen,
+      BigDecimal largestPeOiStrike,
+      BigDecimal largestCeOiStrike) {
+    this(
+        direction,
+        confidence,
+        pcr,
+        suggestedStrategy,
+        suggestedStrikes,
+        reasoning,
+        tradeRecommendation,
+        vix,
+        indexOpen,
+        largestPeOiStrike,
+        largestCeOiStrike,
+        BigDecimal.ZERO);
+  }
+
   public OiAnalysisResult {
     if (tradeRecommendation == null) {
       tradeRecommendation = "";
+    }
+    if (marketSentiment == null) {
+      marketSentiment = BigDecimal.ZERO;
     }
   }
 }

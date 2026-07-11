@@ -19,6 +19,7 @@ FEATURE_COLS = [
     "hour_of_day",
     "day_of_week",
     "spread_pe_ce_max_oi",
+    "market_sentiment",
 ]
 
 SEQ_LENGTH = 10
@@ -32,7 +33,7 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
 
     Expects columns: timestamp, underlyingValue, totalPeOi, totalCeOi,
     totalPeOiChange, totalCeOiChange, pcr, largestPeOiStrike, largestCeOiStrike,
-    vix, indexOpen, indexHigh, indexLow
+    vix, indexOpen, indexHigh, indexLow, marketSentiment
     """
     result = df.copy().sort_values("timestamp").reset_index(drop=True)
 
@@ -41,6 +42,9 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     result["ce_oi_change"] = result["totalCeOiChange"].fillna(0)
     result["pcr"] = result["pcr"].fillna(1.0)
     result["vix"] = result["vix"].fillna(15.0)
+
+    # Market sentiment (-1 to 1)
+    result["market_sentiment"] = result["marketSentiment"].fillna(0.0)
 
     # PCR changes
     result["pcr_change_1"] = result["pcr"].diff(1).fillna(0)

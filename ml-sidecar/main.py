@@ -12,6 +12,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from features import engineer_features, build_latest_sequence, FEATURE_COLS, SEQ_LENGTH
+from sentiment import get_market_sentiment
 from train import train, MODEL_PATH
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -40,6 +41,7 @@ class SnapshotData(BaseModel):
     indexOpen: float | None = None
     indexHigh: float | None = None
     indexLow: float | None = None
+    marketSentiment: float | None = None
 
 
 class PredictRequest(BaseModel):
@@ -59,6 +61,13 @@ class TrainResponse(BaseModel):
     epochs: int | None = None
     samples: int | None = None
     reason: str | None = None
+
+
+class SentimentResponse(BaseModel):
+    score: float
+    label: str
+    headlines: list[str]
+    cached: bool
 
 
 def _load_model():
@@ -92,6 +101,7 @@ def _snapshots_to_dataframe(snapshots: list[dict]) -> pd.DataFrame:
             "indexOpen": snap.get("indexOpen"),
             "indexHigh": snap.get("indexHigh"),
             "indexLow": snap.get("indexLow"),
+            "marketSentiment": snap.get("marketSentiment", 0.0),
         })
     df = pd.DataFrame(records)
     return engineer_features(df)
@@ -105,6 +115,12 @@ def startup():
 @app.get("/health")
 def health():
     return {"model_loaded": session is not None, "model_path": MODEL_PATH}
+
+
+@app.get("/sentiment", response_model=SentimentResponse)
+def sentiment(force_refresh: bool = False):
+    result = get_market_sentiment(force_refresh=force_refresh)
+    return SentimentResponse(**result)
 
 
 @app.post("/predict", response_model=PredictResponse)

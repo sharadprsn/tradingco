@@ -66,6 +66,9 @@ public class OiSnapshotEntity {
   @Column(columnDefinition = "CLOB")
   private String strikePremiumsJson;
 
+  @Column(precision = 10, scale = 4)
+  private BigDecimal marketSentiment;
+
   public OiSnapshotEntity() {}
 
   public OiSnapshotEntity(
@@ -84,7 +87,8 @@ public class OiSnapshotEntity {
       final BigDecimal indexHigh,
       final BigDecimal indexLow,
       final String topOiBuildUpJson,
-      final String strikePremiumsJson) {
+      final String strikePremiumsJson,
+      final BigDecimal marketSentiment) {
     this.timestamp = timestamp;
     this.indexName = indexName;
     this.underlyingValue = underlyingValue;
@@ -101,6 +105,7 @@ public class OiSnapshotEntity {
     this.indexLow = indexLow;
     this.topOiBuildUpJson = topOiBuildUpJson;
     this.strikePremiumsJson = strikePremiumsJson;
+    this.marketSentiment = marketSentiment;
   }
 
   public static OiSnapshotEntity fromSnapshot(
@@ -128,7 +133,8 @@ public class OiSnapshotEntity {
         indexHigh,
         indexLow,
         topOiBuildUpJson,
-        strikePremiumsJson);
+        strikePremiumsJson,
+        snapshot.marketSentiment());
   }
 
   public Long getId() {
@@ -197,5 +203,9 @@ public class OiSnapshotEntity {
 
   public String getStrikePremiumsJson() {
     return strikePremiumsJson;
+  }
+
+  public BigDecimal getMarketSentiment() {
+    return marketSentiment;
   }
 }

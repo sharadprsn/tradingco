@@ -69,7 +69,7 @@ public class DataExportController {
     sw.write(
         "timestamp,indexName,underlyingValue,totalPeOi,totalCeOi,"
             + "totalPeOiChange,totalCeOiChange,pcr,largestPeOiStrike,largestCeOiStrike,"
-            + "vix,indexOpen,indexHigh,indexLow\n");
+            + "vix,indexOpen,indexHigh,indexLow,marketSentiment\n");
 
     for (final OiSnapshotEntity s : snapshots) {
       sw.write(s.getTimestamp().toString());
@@ -99,6 +99,8 @@ public class DataExportController {
       sw.write(nullSafe(s.getIndexHigh()));
       sw.write(",");
       sw.write(nullSafe(s.getIndexLow()));
+      sw.write(",");
+      sw.write(nullSafe(s.getMarketSentiment()));
       sw.write("\n");
     }
 

@@ -12,6 +12,7 @@ import com.kite.trading.dto.OptionChainData;
 import com.kite.trading.dto.OptionChainData.OptionData;
 import com.kite.trading.entity.OiSnapshotEntity;
 import com.kite.trading.repository.OiSnapshotRepository;
+import com.kite.trading.service.SentimentClient.SentimentResult;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Clock;
@@ -89,6 +90,7 @@ public class OiAnalysisService {
   private final OiSnapshotRepository snapshotRepository;
   private final ObjectMapper objectMapper;
   private final LstmPredictionClient lstmClient;
+  private final SentimentClient sentimentClient;
   private final Clock clock;
 
   private final List<OiDataSnapshot> snapshots = new CopyOnWriteArrayList<>();
@@ -154,13 +156,15 @@ public class OiAnalysisService {
       final TelegramService telegramService,
       final OiSnapshotRepository snapshotRepository,
       final ObjectMapper objectMapper,
-      final LstmPredictionClient lstmClient) {
+      final LstmPredictionClient lstmClient,
+      final SentimentClient sentimentClient) {
     this(
         optionChainClient,
         telegramService,
         snapshotRepository,
         objectMapper,
         lstmClient,
+        sentimentClient,
         Clock.system(IST));
   }
 
@@ -170,12 +174,14 @@ public class OiAnalysisService {
       final OiSnapshotRepository snapshotRepository,
       final ObjectMapper objectMapper,
       final LstmPredictionClient lstmClient,
+      final SentimentClient sentimentClient,
       final Clock clock) {
     this.optionChainClient = optionChainClient;
     this.telegramService = telegramService;
     this.snapshotRepository = snapshotRepository;
     this.objectMapper = objectMapper;
     this.lstmClient = lstmClient;
+    this.sentimentClient = sentimentClient;
     this.clock = clock;
   }
 
@@ -298,6 +304,9 @@ public class OiAnalysisService {
             ? buildUpList.subList(0, TOP_STRIKES_COUNT)
             : buildUpList;
 
+    final SentimentResult sentiment = sentimentClient.getSentiment();
+    final BigDecimal marketSentimentVal = sentiment != null ? sentiment.score() : BigDecimal.ZERO;
+
     final OiDataSnapshot snapshot =
         new OiDataSnapshot(
             LocalDateTime.now(clock),
@@ -310,7 +319,8 @@ public class OiAnalysisService {
             topBuildUp,
             maxPeOiStrike,
             maxCeOiStrike,
-            strikePremiums);
+            strikePremiums,
+            marketSentimentVal);
 
     snapshots.add(snapshot);
     logger.info(
@@ -505,6 +515,20 @@ public class OiAnalysisService {
       }
     }
 
+    final BigDecimal sentimentScore =
+        latest.marketSentiment() != null ? latest.marketSentiment() : BigDecimal.ZERO;
+    if (sentimentScore.compareTo(BigDecimal.valueOf(0.15)) > 0) {
+      reasoning
+          .append("Market sentiment is bullish (")
+          .append(sentimentScore.setScale(2, RoundingMode.HALF_UP))
+          .append("). ");
+    } else if (sentimentScore.compareTo(BigDecimal.valueOf(-0.15)) < 0) {
+      reasoning
+          .append("Market sentiment is bearish (")
+          .append(sentimentScore.setScale(2, RoundingMode.HALF_UP))
+          .append("). ");
+    }
+
     final BigDecimal vix = fetchVix();
     final BigDecimal indexOpen = fetchIndexOpen();
 
@@ -524,7 +548,8 @@ public class OiAnalysisService {
             vix,
             indexOpen,
             latest.largestPeOiStrike(),
-            latest.largestCeOiStrike());
+            latest.largestCeOiStrike(),
+            sentimentScore);
 
     lastAnalysis.set(result);
     logger.info(
@@ -643,6 +668,16 @@ public class OiAnalysisService {
         && result.largestCeOiStrike().compareTo(BigDecimal.ZERO) > 0) {
       sb.append("\nMax CE OI: ")
           .append(result.largestCeOiStrike().setScale(0, RoundingMode.HALF_UP));
+    }
+
+    if (result.marketSentiment() != null
+        && result.marketSentiment().abs().compareTo(BigDecimal.valueOf(0.05)) > 0) {
+      final String sentimentEmoji =
+          result.marketSentiment().compareTo(BigDecimal.ZERO) > 0 ? "\uD83D\uDFE2" : "\uD83D\uDD34";
+      sb.append("\n\nMarket Sentiment")
+          .append(sentimentEmoji)
+          .append(": ")
+          .append(result.marketSentiment().setScale(2, RoundingMode.HALF_UP));
     }
 
     sb.append("\n\nSuggested Strategy: ")

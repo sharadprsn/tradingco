@@ -18,5 +18,6 @@ public record LstmPredictionRequest(@JsonProperty("snapshots") List<LstmSnapshot
       @JsonProperty("vix") BigDecimal vix,
       @JsonProperty("indexOpen") BigDecimal indexOpen,
       @JsonProperty("indexHigh") BigDecimal indexHigh,
-      @JsonProperty("indexLow") BigDecimal indexLow) {}
+      @JsonProperty("indexLow") BigDecimal indexLow,
+      @JsonProperty("marketSentiment") BigDecimal marketSentiment) {}
 }

@@ -19,6 +19,9 @@ services:
       - ./logs:/app/logs
       - ./data:/app/data
     restart: unless-stopped
+    depends_on:
+      ml-sidecar:
+        condition: service_started
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:443/actuator/health"]
       interval: 30s
