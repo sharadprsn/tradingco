@@ -13,7 +13,7 @@ services:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
       - TELEGRAM_BASE_URL=${TELEGRAM_BASE_URL:-https://api.telegram.org}
-      - APP_BASE_URL=${APP_BASE_URL:-https://80.225.215.99:443}
+      - APP_BASE_URL=${APP_BASE_URL:-https://92.4.88.249:443}
       - ML_ENABLED=${ML_ENABLED:-true}
     volumes:
       - ./logs:/app/logs
