@@ -207,8 +207,7 @@ docker compose up --build
 # Build image manually
 docker build -t sharadprsn/kite-trading:latest .
 # Tag for your registry
-docker tag kite-trading:latest sharadprsn/kite-trading:latest
-docker tag kite-trading:latest sharadprsn/kite-trading:1.0.0
+docker tag sharadprsn/kite-trading:latest sharadprsn/kite-trading:1.0.0
 
 # Push to registry
 docker push sharadprsn/kite-trading:latest

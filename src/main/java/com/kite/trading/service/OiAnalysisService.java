@@ -73,8 +73,6 @@ public class OiAnalysisService {
 
   // === Position sizing constants ===
   private static final BigDecimal DEPLOYED_CAPITAL = BigDecimal.valueOf(1_000_000);
-  private static final BigDecimal TARGET_PCT = BigDecimal.valueOf(0.6);
-  private static final BigDecimal STOP_LOSS_PCT = BigDecimal.valueOf(1.0);
   private static final int LOT_SIZE_NIFTY = 65;
   private static final int LOT_SIZE_SENSEX = 20;
   private static final BigDecimal MIN_SPREAD_NIFTY = BigDecimal.valueOf(100);
@@ -733,9 +731,7 @@ public class OiAnalysisService {
     }
 
     sb.append("\n\nSuggested Strategy: ")
-        .append(result.suggestedStrategy())
-        .append("\nSuggested Strikes: ")
-        .append(result.suggestedStrikes());
+        .append(result.suggestedStrategy());
 
     if (result.tradeRecommendation() != null && !result.tradeRecommendation().isBlank()) {
       sb.append("\n\nTrade Recommendation:\n").append(result.tradeRecommendation());
@@ -1179,15 +1175,6 @@ public class OiAnalysisService {
     final String expiry = knownExpiryDates.getFirst().format(fmt);
     final int lotSz = lotSize();
 
-    final BigDecimal targetAmt =
-        DEPLOYED_CAPITAL
-            .multiply(TARGET_PCT)
-            .divide(BigDecimal.valueOf(100), 0, RoundingMode.HALF_UP);
-    final BigDecimal slAmt =
-        DEPLOYED_CAPITAL
-            .multiply(STOP_LOSS_PCT)
-            .divide(BigDecimal.valueOf(100), 0, RoundingMode.HALF_UP);
-
     final StringBuilder rec = new StringBuilder();
 
     final String tradeLine =
@@ -1231,31 +1218,15 @@ public class OiAnalysisService {
       rec.append(" | Spread: ").append(spread).append(" pts");
     }
 
-    rec.append("\nCapital: \u20B9")
-        .append(DEPLOYED_CAPITAL)
-        .append(" | Target: \u20B9")
-        .append(targetAmt)
-        .append(" (0.6%)")
-        .append(" | SL: \u20B9")
-        .append(slAmt)
-        .append(" (1%)");
-
     final int maxLots = DEPLOYED_CAPITAL.divide(MARGIN_PER_LOT, 0, RoundingMode.DOWN).intValue();
     final int lots =
         Math.max(1, maxLots * confidence.min(BigDecimal.valueOf(100)).intValue() / 100);
     final int totalQty = lots * lotSz;
-    final BigDecimal decayPointsNeeded =
-        targetAmt.divide(BigDecimal.valueOf(totalQty), 1, RoundingMode.HALF_UP);
-
     rec.append("\nLots: ")
         .append(lots)
         .append(" (Qty: ")
         .append(totalQty)
-        .append(") | Dynamic Position Sizing")
-        .append("\nDecay Target: ")
-        .append(decayPointsNeeded)
-        .append(" pts decay needed to hit target")
-        .append(" | SL: Exits at 2.0x net entry premium");
+        .append(") | Dynamic Position Sizing");
 
     rec.append("\nOI Reasoning: ");
     if (latest.largestPeOiStrike() != null
@@ -1282,39 +1253,12 @@ public class OiAnalysisService {
               .setScale(0, RoundingMode.HALF_UP)
               .multiply(vix)
               .divide(BigDecimal.valueOf(1600), 0, RoundingMode.HALF_UP);
-      rec.append("\nDay range: \u00B1").append(range).append(" pts");
-    }
-
-    final BigDecimal slippage = BigDecimal.valueOf(totalQty);
-    final BigDecimal netTarget = targetAmt.subtract(slippage);
-    rec.append("\nSlippage Est: \u20B9")
-        .append(slippage)
-        .append(" (assuming \u20B91.0 per unit) | Net Target: \u20B9")
-        .append(netTarget);
-
-    if (!knownExpiryDates.isEmpty()) {
-      final LocalDate expiryDate = knownExpiryDates.getFirst();
-      final BigDecimal sellStr = strikes.getFirst();
-      final BigDecimal hedgeStr =
-          "NEUTRAL".equals(direction)
-              ? (strikes.size() > 1 ? strikes.get(1) : BigDecimal.ZERO)
-              : (hedgeStrike != null ? hedgeStrike : BigDecimal.ZERO);
-
-      final String basketJson =
-          buildBasketOrderJson(
-              currentIndex,
-              expiryDate,
-              sellStr,
-              hedgeStr,
-              "BULLISH".equals(direction)
-                  ? "PE"
-                  : "BEARISH".equals(direction) ? "CE" : "IRON_CONDOR",
-              totalQty,
-              direction,
-              latest);
-      rec.append("\n\n\uD83D\uDCCB Zerodha Basket Order JSON:\n```json\n")
-          .append(basketJson)
-          .append("\n```");
+      final BigDecimal lower = indexOpen.subtract(range);
+      final BigDecimal upper = indexOpen.add(range);
+      rec.append("\nMarket Range: ")
+          .append(lower.setScale(0, RoundingMode.HALF_UP))
+          .append(" - ")
+          .append(upper.setScale(0, RoundingMode.HALF_UP));
     }
 
     return rec.toString();
@@ -2404,149 +2348,5 @@ public class OiAnalysisService {
     } catch (final Exception e) {
       return index.toUpperCase() + strike + type;
     }
-  }
-
-  private String buildBasketOrderJson(
-      final String index,
-      final LocalDate expiryDate,
-      final BigDecimal sellStrike,
-      final BigDecimal hedgeStrike,
-      final String type,
-      final int quantity,
-      final String direction,
-      final OiDataSnapshot latest) {
-    final StringBuilder json = new StringBuilder();
-    json.append("[\n");
-
-    if ("IRON_CONDOR".equals(type)) {
-      // 4-leg iron condor: SELL PE, BUY PE, SELL CE, BUY CE
-      final BigDecimal longPutStrike =
-          findWingStrikeByDelta(
-              latest.strikePremiums(),
-              "PE",
-              sellStrike,
-              -0.05,
-              latest.underlyingValue(),
-              computeDaysToExpiry());
-      final BigDecimal longCallStrike =
-          findWingStrikeByDelta(
-              latest.strikePremiums(),
-              "CE",
-              hedgeStrike,
-              0.05,
-              latest.underlyingValue(),
-              computeDaysToExpiry());
-      final BigDecimal longPutPremium =
-          longPutStrike != null ? lookupPremium(latest, longPutStrike, "PE") : BigDecimal.ZERO;
-      final BigDecimal longCallPremium =
-          longCallStrike != null ? lookupPremium(latest, longCallStrike, "CE") : BigDecimal.ZERO;
-      final BigDecimal shortPutPremium = lookupPremium(latest, sellStrike, "PE");
-      final BigDecimal shortCallPremium = lookupPremium(latest, hedgeStrike, "CE");
-
-      appendLeg(
-          json,
-          buildZerodhaSymbol(index, expiryDate, sellStrike, "PE"),
-          "SELL",
-          shortPutPremium,
-          quantity);
-      json.append(",\n");
-      appendLeg(
-          json,
-          buildZerodhaSymbol(
-              index, expiryDate, longPutStrike != null ? longPutStrike : BigDecimal.ZERO, "PE"),
-          "BUY",
-          longPutPremium,
-          quantity);
-      json.append(",\n");
-      appendLeg(
-          json,
-          buildZerodhaSymbol(index, expiryDate, hedgeStrike, "CE"),
-          "SELL",
-          shortCallPremium,
-          quantity);
-      json.append(",\n");
-      appendLeg(
-          json,
-          buildZerodhaSymbol(
-              index, expiryDate, longCallStrike != null ? longCallStrike : BigDecimal.ZERO, "CE"),
-          "BUY",
-          longCallPremium,
-          quantity);
-      json.append("\n");
-    } else if ("BULLISH".equals(direction) || "BEARISH".equals(direction)) {
-      final String optType = "BULLISH".equals(direction) ? "PE" : "CE";
-      final BigDecimal hedgePremium = lookupPremium(latest, hedgeStrike, optType);
-      final BigDecimal sellPremium = lookupPremium(latest, sellStrike, optType);
-
-      // Leg 1: BUY (Hedge)
-      appendLeg(
-          json,
-          buildZerodhaSymbol(index, expiryDate, hedgeStrike, optType),
-          "BUY",
-          hedgePremium,
-          quantity);
-      json.append(",\n");
-
-      // Leg 2: SELL (Short)
-      appendLeg(
-          json,
-          buildZerodhaSymbol(index, expiryDate, sellStrike, optType),
-          "SELL",
-          sellPremium,
-          quantity);
-      json.append("\n");
-    } else {
-      // Fallback: short strangle (no wings)
-      final BigDecimal putPremium = lookupPremium(latest, sellStrike, "PE");
-      final BigDecimal callPremium = lookupPremium(latest, hedgeStrike, "CE");
-
-      appendLeg(
-          json,
-          buildZerodhaSymbol(index, expiryDate, sellStrike, "PE"),
-          "SELL",
-          putPremium,
-          quantity);
-      json.append(",\n");
-      appendLeg(
-          json,
-          buildZerodhaSymbol(index, expiryDate, hedgeStrike, "CE"),
-          "SELL",
-          callPremium,
-          quantity);
-      json.append("\n");
-    }
-
-    json.append("]");
-    return json.toString();
-  }
-
-  private void appendLeg(
-      final StringBuilder json,
-      final String symbol,
-      final String transactionType,
-      final BigDecimal premium,
-      final int quantity) {
-    json.append("  {\n")
-        .append("    \"variety\": \"regular\",\n")
-        .append("    \"tradingsymbol\": \"")
-        .append(symbol)
-        .append("\",\n")
-        .append("    \"exchange\": \"NFO\",\n")
-        .append("    \"transaction_type\": \"")
-        .append(transactionType)
-        .append("\",\n")
-        .append("    \"order_type\": \"LIMIT\",\n")
-        .append("    \"price\": ")
-        .append(
-            premium.compareTo(BigDecimal.ZERO) > 0
-                ? premium.setScale(0, RoundingMode.HALF_UP)
-                : BigDecimal.ZERO)
-        .append(",\n")
-        .append("    \"quantity\": ")
-        .append(quantity)
-        .append(",\n")
-        .append("    \"product\": \"NRML\",\n")
-        .append("    \"validity\": \"DAY\"\n")
-        .append("  }");
   }
 }
