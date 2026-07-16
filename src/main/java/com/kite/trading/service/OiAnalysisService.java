@@ -730,8 +730,7 @@ public class OiAnalysisService {
           .append(result.marketSentiment().setScale(2, RoundingMode.HALF_UP));
     }
 
-    sb.append("\n\nSuggested Strategy: ")
-        .append(result.suggestedStrategy());
+    sb.append("\n\nSuggested Strategy: ").append(result.suggestedStrategy());
 
     if (result.tradeRecommendation() != null && !result.tradeRecommendation().isBlank()) {
       sb.append("\n\nTrade Recommendation:\n").append(result.tradeRecommendation());

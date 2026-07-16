@@ -18,12 +18,12 @@ public class FallbackOptionChainClient implements OptionChainClient {
       Set.of("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY");
 
   private final NseOptionChainClient nseClient;
-  private final YahooFinanceOptionChainClient yahooClient;
+  private final OpenAlgoOptionChainClient openAlgoClient;
 
   public FallbackOptionChainClient(
-      final NseOptionChainClient nseClient, final YahooFinanceOptionChainClient yahooClient) {
+      final NseOptionChainClient nseClient, final OpenAlgoOptionChainClient openAlgoClient) {
     this.nseClient = nseClient;
-    this.yahooClient = yahooClient;
+    this.openAlgoClient = openAlgoClient;
   }
 
   @Override
@@ -36,7 +36,7 @@ public class FallbackOptionChainClient implements OptionChainClient {
     if (NSE_SYMBOLS.contains(symbol)) {
       return fetchFromNse(symbol);
     }
-    return yahooClient.fetchOptionChain(symbol);
+    return openAlgoClient.fetchOptionChain(symbol);
   }
 
   private OptionChainData fetchFromNse(final String symbol) {
@@ -61,13 +61,13 @@ public class FallbackOptionChainClient implements OptionChainClient {
     }
 
     logger.warn(
-        "NSE option chain failed after 3 attempts for {}, falling back to Yahoo Finance", symbol);
-    final OptionChainData yahooData = yahooClient.fetchOptionChain(symbol);
-    if (isValid(yahooData)) {
-      return yahooData;
+        "NSE option chain failed after 3 attempts for {}, falling back to OpenAlgo", symbol);
+    final OptionChainData openAlgoData = openAlgoClient.fetchOptionChain(symbol);
+    if (isValid(openAlgoData)) {
+      return openAlgoData;
     }
 
-    logger.error("Both NSE and Yahoo Finance option chain sources failed for {}", symbol);
+    logger.error("Both NSE and OpenAlgo option chain sources failed for {}", symbol);
     return null;
   }
 

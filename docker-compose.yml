@@ -15,9 +15,14 @@ services:
       - TELEGRAM_BASE_URL=${TELEGRAM_BASE_URL:-https://api.telegram.org}
       - APP_BASE_URL=${APP_BASE_URL:-https://92.4.88.249:443}
       - ML_ENABLED=${ML_ENABLED:-true}
+      - OPENALGO_BASE_URL=http://openalgo:5000
+      - OPENALGO_API_KEY=${OPENALGO_API_KEY}
     volumes:
       - ./logs:/app/logs
       - ./data:/app/data
+    depends_on:
+      openalgo:
+        condition: service_started
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:443/actuator/health"]
@@ -25,3 +30,16 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  openalgo:
+    image: marketcalls/openalgo:latest
+    container_name: openalgo
+    ports:
+      - "5000:5000"
+      - "8765:8765"
+    environment:
+      - TZ=Asia/Kolkata
+    volumes:
+      - ./openalgo-data/db:/app/db
+      - ./openalgo-data/log:/app/log
+    restart: unless-stopped
