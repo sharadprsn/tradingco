@@ -39,7 +39,7 @@ EXPOSE 443
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=30s --retries=3 \
-  CMD wget -q --spider http://localhost:443/actuator/health || exit 1
+  CMD wget -q --spider --no-check-certificate https://localhost:443/actuator/health || exit 1
 
 # Ensure logs and data directories are writable, then run as spring user
 ENTRYPOINT ["/bin/sh", "-c", "mkdir -p /app/logs /app/data && chmod 777 /app/logs /app/data && exec su-exec spring java -jar app.jar"]

@@ -738,4 +738,99 @@ class OiAnalysisServiceTest {
         null,
         null);
   }
+
+  // ── Helper: build a minimal OiDataSnapshot for stability tests ───────────────
+
+  private static OiDataSnapshot stableSnap(
+      final double pcr, final double peOiChange, final double ceOiChange) {
+    return new OiDataSnapshot(
+        java.time.LocalDateTime.now(), // timestamp
+        BigDecimal.valueOf(24200), // underlyingValue
+        BigDecimal.valueOf(1_200_000), // totalPeOi
+        BigDecimal.valueOf(1_000_000), // totalCeOi
+        BigDecimal.valueOf(peOiChange), // totalPeOiChange
+        BigDecimal.valueOf(ceOiChange), // totalCeOiChange
+        BigDecimal.valueOf(pcr), // pcr
+        List.of(), // topOiBuildUp — empty, no velocity concern
+        BigDecimal.valueOf(24000), // largestPeOiStrike
+        BigDecimal.valueOf(24500), // largestCeOiStrike
+        List.of(), // strikePremiums
+        BigDecimal.ZERO); // marketSentiment
+  }
+
+  private static OiDataSnapshot snapWithVelocity(final double pchangeInOi) {
+    final OiDataSnapshot.OiStrikeInfo hotStrike =
+        new OiDataSnapshot.OiStrikeInfo(
+            BigDecimal.valueOf(24000), // strikePrice
+            "PE", // optionType
+            BigDecimal.valueOf(500_000), // openInterest
+            BigDecimal.valueOf(50_000), // changeInOi
+            BigDecimal.valueOf(pchangeInOi)); // pchangeInOi
+    return new OiDataSnapshot(
+        java.time.LocalDateTime.now(),
+        BigDecimal.valueOf(24200),
+        BigDecimal.valueOf(1_200_000),
+        BigDecimal.valueOf(1_000_000),
+        BigDecimal.valueOf(80_000),
+        BigDecimal.valueOf(60_000),
+        BigDecimal.valueOf(1.15),
+        List.of(hotStrike),
+        BigDecimal.valueOf(24000),
+        BigDecimal.valueOf(24500),
+        List.of(),
+        BigDecimal.ZERO);
+  }
+
+  // ── isOiStable() tests ───────────────────────────────────────────────────────
+
+  @Test
+  void isOiStable_false_whenFewerThanThreeSnapshots() {
+    service.addSnapshotForTesting(stableSnap(1.15, 100_000, 80_000));
+    service.addSnapshotForTesting(stableSnap(1.16, 90_000, 70_000));
+
+    assertFalse(service.isOiStable(), "Should not be stable with only 2 snapshots");
+  }
+
+  @Test
+  void isOiStable_false_whenPcrVarianceTooHigh() {
+    // PCR swings 0.12 across the window (> 0.05 threshold)
+    service.addSnapshotForTesting(stableSnap(1.05, 100_000, 90_000));
+    service.addSnapshotForTesting(stableSnap(1.12, 90_000, 60_000));
+    service.addSnapshotForTesting(stableSnap(1.17, 80_000, 40_000));
+
+    assertFalse(service.isOiStable(), "Should not be stable when PCR variance > 0.05");
+  }
+
+  @Test
+  void isOiStable_false_whenOiChangeRateNotDecelerating() {
+    // Latest OI delta = 160K, first OI delta = 200K → ratio = 0.80 > 0.50 threshold
+    service.addSnapshotForTesting(stableSnap(1.14, 120_000, 80_000)); // Δ = 200K
+    service.addSnapshotForTesting(stableSnap(1.15, 100_000, 80_000)); // Δ = 180K
+    service.addSnapshotForTesting(stableSnap(1.15, 95_000, 65_000)); // Δ = 160K
+
+    assertFalse(service.isOiStable(), "Should not be stable when OI change rate is still high");
+  }
+
+  @Test
+  void isOiStable_false_whenHighOiVelocityAtStrike() {
+    // pchangeInOi = 55% at one strike (> 30% threshold)
+    service.addSnapshotForTesting(stableSnap(1.15, 100_000, 80_000));
+    service.addSnapshotForTesting(stableSnap(1.15, 90_000, 70_000));
+    service.addSnapshotForTesting(snapWithVelocity(55.0));
+
+    assertFalse(
+        service.isOiStable(), "Should not be stable with aggressive OI velocity at a strike");
+  }
+
+  @Test
+  void isOiStable_true_whenAllConditionsMet() {
+    // PCR varies by only 0.02 (< 0.05), OI rate decelerates well below 50%
+    service.addSnapshotForTesting(stableSnap(1.15, 500_000, 400_000)); // Δ = 900K (window start)
+    service.addSnapshotForTesting(stableSnap(1.16, 200_000, 150_000)); // Δ = 350K
+    service.addSnapshotForTesting(stableSnap(1.16, 80_000, 50_000)); // Δ = 130K  (< 50% of 900K ✅)
+
+    assertTrue(
+        service.isOiStable(),
+        "Should be stable: PCR stable, OI rate decelerated, no velocity spike");
+  }
 }

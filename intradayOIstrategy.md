@@ -8,8 +8,8 @@ This strategy analyzes Nifty & Sensex option chain data to determine intraday ma
 
 | Day | Index | Strike Interval | Lot Size |
 |-----|-------|-----------------|----------|
-| Mon, Tue, Fri | NIFTY | 50 | 50 |
-| Wed, Thu | SENSEX | 100 | 10 |
+| Mon, Tue, Fri | NIFTY | 50 | 65 |
+| Wed, Thu | SENSEX | 100 | 20 |
 
 The index is resolved automatically via `resolveIndexForDay()` using `LocalDate.now().getDayOfWeek()`.
 
@@ -37,9 +37,8 @@ NSE Option Chain API
 | Time | Event |
 |------|-------|
 | 9:00 AM | Daily reset — clear state, send initialization message |
-| 9:05 AM | Send Kite login URL for authentication |
-| 9:30-3:30 (every 6 min) | Fetch OI data, check for updates, send 10 AM prediction, check exit signals |
-| 4:00 PM | Market close summary, reset state |
+| 9:15 AM - 3:30 PM (every 6 min) | Fetch OI data, record snapshots, check stability to notify Calendar Spread alert, check exit signals |
+| 4:00 PM | Market close summary, retrain ML model, reset state |
 
 ---
 
@@ -65,9 +64,9 @@ NSE Option Chain API
 | `TOP_STRIKES_COUNT` | 5 | Number of top OI buildup strikes to track |
 | `PCR_BULLISH_THRESHOLD` | 1.2 | PCR above this is considered bullish |
 | `PCR_BEARISH_THRESHOLD` | 0.8 | PCR below this is considered bearish |
-| `LOT_SIZE_NIFTY` | 50 | Nifty lot size |
-| `LOT_SIZE_SENSEX` | 10 | Sensex lot size |
-| `OI_CHANGE_SIGNIFICANCE` | 20 | Minimum OI change considered significant |
+| `LOT_SIZE_NIFTY` | 65 | Nifty lot size |
+| `LOT_SIZE_SENSEX` | 20 | Sensex lot size |
+| `EXIT_OI_SURGE_PCT` | 0.03 (3%) | OI surge exit trigger fraction of total OI |
 
 ---
 
@@ -97,9 +96,9 @@ Compare the first snapshot vs latest snapshot:
 
 | Direction | Strategy |
 |-----------|----------|
-| BULLISH | PUT CREDIT SPREAD |
-| BEARISH | CALL CREDIT SPREAD |
-| NEUTRAL | SHORT STRANGLE |
+| BULLISH | DIRECTIONAL PUT SELLING |
+| BEARISH | DIRECTIONAL CALL SELLING |
+| NEUTRAL | SHORT IRON CONDOR |
 
 ### Strike Selection
 
@@ -113,23 +112,21 @@ The `findStrikeByPremium()` method scans the live `strikePremiums` list (stored 
 
 ### Position Sizing
 
-| Parameter | Value |
-|-----------|-------|
-| `DEPLOYED_CAPITAL` | ₹10,00,000 |
-| Target | 0.6% = ₹6,000 |
-| Stop Loss | 1% = ₹10,000 |
-| Premium target (Nifty) | ₹120/unit (lot 50) = ₹6,000 |
-| SL points (Nifty) | 200 pts = ₹10,000 |
+Position sizing is dynamic and confidence-weighted:
+
+- **Capital Base**: `DEPLOYED_CAPITAL` = ₹10,00,000
+- **Margin Per Lot**: `MARGIN_PER_LOT` = ₹60,000
+- **Max Lots**: `maxLots` = ₹10,00,000 / ₹60,000 = 16 lots (Nifty lot size = 65, Sensex = 20)
+- **Sizing Rule**: `lots` = `maxLots × confidence%` (capped at 95% confidence blended, minimum 1 lot)
 
 ### Trade Recommendation Format
 
 ```
 SELL {strike} PE (expiry)
 BUY {hedge} PE (expiry) [Hedge] | Spread: {width} pts
-Capital: ₹1000000 | Target: ₹6000 (0.6%) | SL: ₹10000 (1%)
-Lot: 50 | Premium target: ₹120/unit | SL: 200 pts
-OI Reasoning: Max PE OI at 25000. Max CE OI at 25500. PCR: 1.45 | Confidence: 83%
-Day range: ±219 pts
+Lots: {lots} (Qty: {qty}) | Dynamic Position Sizing
+OI Reasoning: Max PE OI at {strike}. Max CE OI at {strike}. PCR: {pcr} | Confidence: {confidence}%
+Market Range: {lower} - {upper}
 ```
 
 ---
@@ -147,12 +144,15 @@ The exit system is a multi-layered assessment pipeline with three categories of 
 | Signal | Category | Description |
 |--------|----------|-------------|
 | `NONE` | — | No exit warranted |
-| `HARD_STOP` | Price-based | 1% adverse move against position → exit immediately |
-| `TRAILING_STOP` | Price-based | 0.5% pullback from best price (when in profit) → exit immediately |
+| `HARD_STOP` | Price-based | Net premium doubles (2.0x) or sold leg premium reaches 2.5x → exit immediately |
+| `TRAILING_STOP` | Price-based | 0.5% pullback of underlying price from best watermark (when in profit) → exit immediately |
+| `STRIKE_BREACH` | Price-based | Spot price crosses the short/sold strike → exit immediately |
+| `PROFIT_TARGET` | Price-based | Net premium decays to 20% or less of entry net premium (80% decay) → exit immediately |
+| `TIME_SQOFF` | Time-based | Time matches or exceeds 3:10 PM IST → exit immediately |
 | `PCR_SHIFT` | OI-based | PCR has moved significantly since position entry |
 | `DIRECTION_REVERSAL` | OI-based | Market direction inferred from OI has reversed |
-| `SUPERTREND_REVERSAL` | OI-based | 15-min SuperTrend flipped direction |
-| `OI_SURGE` | OI-based | Abnormal OI volume detected |
+| `SUPERTREND_REVERSAL` | OI-based | 30-min SuperTrend flipped direction (period 5, multiplier 3.0) |
+| `OI_SURGE` | OI-based | Total absolute OI change in snapshot exceeds 3% of total open interest |
 
 ### Assessment Pipeline (`computeExitAssessment`)
 
@@ -164,70 +164,75 @@ The pipeline runs in this strict order — earlier checks take priority and bypa
    - At least 2 snapshots must exist
    - Entry snapshot must be available
 
-2. HARD STOP CHECK (Price-Based — skips cooldown)
-   - If entry direction is BULLISH and price dropped >= 1% from entry → HARD_STOP
-   - If entry direction is BEARISH and price rose >= 1% from entry → HARD_STOP
-   - Neutral direction: 1% move either way → HARD_STOP
+2. Time-Based Square-off Check (Price-Based — skips cooldown)
+   - If time is 3:10 PM IST or later → TIME_SQOFF (100% exit)
    - Fires immediately, no confirmation needed
 
-3. TRAILING STOP CHECK (Price-Based — skips cooldown)
-   - If BULLISH and in profit: track highest price since entry
-     If price pulls back >= 0.5% from that peak → TRAILING_STOP
-   - If BEARISH and in profit: track lowest price since entry
-     If price rallies >= 0.5% from that trough → TRAILING_STOP
+3. HARD STOP CHECK (Price-Based — skips cooldown)
+   - If net premium doubles (2.0x) OR sold leg premium >= 2.5x entry sold premium → HARD_STOP (100% exit)
    - Fires immediately, no confirmation needed
 
-4. LOSS CAP CHECK (Price-Based — skips cooldown)
-   - If estimated unrealized loss exceeds 2% → HARD_STOP
-   - Loss is estimated relative to entry price and direction
+4. TRAILING STOP CHECK (Price-Based — skips cooldown)
+   - If BULLISH and in profit: track highest price since entry. If price pulls back >= 0.5% → TRAILING_STOP (100% exit)
+   - If BEARISH and in profit: track lowest price since entry. If price rallies >= 0.5% → TRAILING_STOP (100% exit)
    - Fires immediately, no confirmation needed
 
-5. Cooldown Check
-   - Only reached if none of the price-based stops triggered
+5. STRIKE BREACH CHECK (Price-Based — skips cooldown)
+   - If spot price crosses the sold strike (below PE for Bullish, above CE for Bearish) → STRIKE_BREACH (100% exit)
+   - If Iron Condor: spot price crosses either short leg → STRIKE_BREACH (100% exit)
+   - Fires immediately, no confirmation needed
+
+6. PROFIT TARGET CHECK (Price-Based — skips cooldown)
+   - If current net premium decays to <= 20% of entry net premium → PROFIT_TARGET (100% exit)
+   - Fires immediately, no confirmation needed
+
+7. Cooldown Check
+   - Only reached if none of the price-based/time-based stops triggered
    - If an OI-based exit fired within the last 15 minutes, return NONE
-   - Hard stops do NOT set cooldown, allowing immediate re-entry
+   - Hard/trailing/breach/profit stops do NOT set cooldown and skip cooldown
 
-6. Afternoon Threshold Tightening
-   - After 2:30 PM IST, the PCR threshold is halved (× 0.5)
+8. Afternoon Threshold Tightening
+   - After 2:30 PM IST, the PCR threshold is multiplied by 0.5
    - Accounts for accelerated theta decay and fading intraday trends
 
-7. Signal Detection (priority order)
+9. Signal Detection (priority order)
    a. Dynamic PCR Shift → PCR_SHIFT
    b. Rolling Direction Reversal → DIRECTION_REVERSAL
    c. SuperTrend Reversal → SUPERTREND_REVERSAL
    d. OI Volume Surge → OI_SURGE
    e. No signal → reset streak, return NONE
 
-8. Strong Signal Fast-Track
-   - If PCR_SHIFT + DIRECTION_REVERSAL fire together → requires only 1 confirmation
-   - If PCR_SHIFT ratio > 2× threshold → requires only 1 confirmation
-   - Otherwise → requires 2 confirmations (standard)
+10. Strong Signal Fast-Track
+    - If PCR_SHIFT + DIRECTION_REVERSAL fire together → requires only 1 confirmation
+    - If PCR_SHIFT + SUPERTREND_REVERSAL fire together → requires only 1 confirmation
+    - If PCR_SHIFT ratio > 2× threshold → requires only 1 confirmation
+    - Otherwise → requires 2 confirmations (standard)
 
-9. Confirmation Lag
-   - First detection: log, send EARLY WARNING via Telegram, set streak=1, return NONE
-   - Consecutive same signal: increment streak
-   - If streak < required: return NONE (waiting for confirmation)
-   - If streak >= required: proceed (confirmed signal)
+11. Confirmation Lag
+    - First detection: log, send EARLY WARNING via Telegram, set streak=1, return NONE
+    - Consecutive same signal: increment streak
+    - If streak < required: return NONE (waiting for confirmation)
+    - If streak >= required: proceed (confirmed signal)
 
-10. Confidence Computation
+12. Confidence Computation
     - PCR_SHIFT: 30% + (ratio × 40%), capped at 80%
     - DIRECTION_REVERSAL: 70%
     - SUPERTREND_REVERSAL: 65%
     - OI_SURGE: 55%
-    - Boost: +15% if multiple signals, +10% if price confirmed, +10% after 2:30 PM, +10% if loss > 0.5%
+    - Boosts: +15% if multiple signals, +10% if price confirmed (>=0.5% move), +10% after 2:30 PM, +10% if loss > 0.5%
     - Overall cap: 95%
 
-11. Exit Fraction (scaling)
-    - HARD_STOP / TRAILING_STOP: exit 100%
+13. Exit Fraction (scaling)
+    - HARD_STOP / TRAILING_STOP / STRIKE_BREACH / PROFIT_TARGET / TIME_SQOFF: exit 100%
     - PCR_SHIFT with ratio < 1.5×: exit 50% of position
     - PCR_SHIFT with ratio >= 1.5×: exit 100%
     - SUPERTREND_REVERSAL: exit 50%
     - All other signals: exit 100%
 
-12. Fire Exit
+14. Fire Exit
     - Send Telegram alert via `buildExitReport`
     - For OI-based exits: record `lastExitFiredAt` for cooldown
-    - For price-based exits: skip cooldown (allows immediate re-entry)
+    - For price-based/time-based exits: skip cooldown
     - Reset confirmation state, early warning flag
 ```
 
@@ -264,35 +269,30 @@ Apply the same >60% dominance rule on the aggregated values.
 
 #### OI Surge Detection
 
-If the total absolute OI change (|PE change| + |CE change|) in a single snapshot exceeds 50 contracts, flag as an OI surge — indicating aggressive positioning.
+If the total absolute OI change (|PE change| + |CE change|) in a single snapshot divided by the total open interest (PE + CE) exceeds 3% (`EXIT_OI_SURGE_PCT = 0.03`), it triggers an `OI_SURGE` signal — indicating aggressive institutional repositioning.
 
 #### SuperTrend Reversal (`checkSuperTrendReversal`)
 
-A 15-min SuperTrend (3 snapshots) using ATR-based bands. When the trend direction flips, it triggers `SUPERTREND_REVERSAL` — a 50% partial exit signal.
+A 30-min SuperTrend (5 snapshots) using ATR-based bands. When the trend direction flips, it triggers `SUPERTREND_REVERSAL` — a 50% partial exit signal.
 
 #### Hard Stop-Loss (`isHardStopTriggered`)
 
-Exits the position immediately if the underlying moves 1% against the entry direction. This is the primary loss cap mechanism:
+Exits the position immediately if options pricing reaches defensive thresholds (checked at every tick, skips cooldown):
 
-- BULLISH entry: stop if price drops >= 1% below entry
-- BEARISH entry: stop if price rises >= 1% above entry
-- Skips cooldown, fires without confirmation
+- **Spread Stop**: If current net premium of the spread has doubled (>= 2.0x entry net premium).
+- **Leg Stop**: If the sold leg premium independently reaches >= 2.5x of the entry sold premium.
+- **Iron Condor Leg Stop**: Checks both sold legs independently; if either sold leg reaches >= 2.5x entry premium.
 
 #### Trailing Stop-Loss (`isTrailingStopTriggered`)
 
-Once the position is in profit, tracks the best price (highest for BULLISH, lowest for BEARISH). If the price pulls back 0.5% from that extreme, exits to lock in gains:
+Once the position is in profit (underlying price is favorable compared to entry price), tracks the best underlying price (highest for BULLISH, lowest for BEARISH). If the price pulls back 0.5% from that extreme, exits to lock in gains:
 
 - BULLISH: stop if current price < peak × (1 - 0.005)
 - BEARISH: stop if current price > trough × (1 + 0.005)
-- Only fires when in profit (current price better than entry)
 
-#### Loss Cap (`isLossCapExceeded`)
+#### Loss Cap
 
-If the estimated unrealized loss exceeds 2% of entry, triggers a hard exit. Estimated loss is calculated relative to direction:
-
-- BULLISH: loss % = (entry - current) / entry × 100
-- BEARISH: loss % = (current - entry) / entry × 100
-- If current price is favorable (profit), loss is 0%
+An unused config constant `LOSS_CAP_PCT` (2.0%) exists in the codebase but is currently superseded by the premium-based hard stop-loss and underlying trailing stop-loss checks.
 
 #### Early Warning (`sendEarlyWarning`)
 
@@ -319,7 +319,7 @@ Changed from a gate (blocking exits) to a confidence booster (+10). The 0.5% pri
 
 - Reduced from 30 to 15 minutes
 - Only applies to OI-based exits (PCR shift, direction reversal, SuperTrend, OI surge)
-- Hard stops and trailing stops skip cooldown entirely
+- Hard/trailing/breach/profit stops skip cooldown entirely
 
 ### Position Lifecycle
 
@@ -355,7 +355,7 @@ Current Nifty: 24350.00
 
 🔄 New Recommendation:
 🟢 Direction: BULLISH (75%)
-Strategy: PUT CREDIT SPREAD
+Strategy: DIRECTIONAL PUT SELLING
 SELL 24300 PE (05-JUN) | HEDGE: BUY 24200 PE (12-JUN)
 ```
 
@@ -380,36 +380,36 @@ OI updates are sent only when significant changes are detected:
 | `PCR_BULLISH_THRESHOLD` | 1.2 | PCR above this is bullish |
 | `PCR_BEARISH_THRESHOLD` | 0.8 | PCR below this is bearish |
 | `TOP_STRIKES_COUNT` | 5 | Top OI buildup strikes to track |
-| `STRIKE_INTERVAL` | 50 | Nifty strike spacing |
+| `STRIKE_INTERVAL_NIFTY` | 50 | Nifty strike spacing |
+| `STRIKE_INTERVAL_SENSEX` | 100 | Sensex strike spacing |
 
 ### Exit Strategy Constants
 
 | Parameter | Value | Purpose |
 |-----------|-------|---------|
 | `EXIT_PCR_SHIFT` | 0.3 | Floor for PCR shift threshold |
-| `EXIT_OI_SURGE` | 50 | OI surge trigger (contracts) |
+| `EXIT_OI_SURGE_PCT` | 0.03 (3%) | OI surge trigger percentage of total open interest |
 | `CONFIRMATION_CONSECUTIVE` | 2 | Standard consecutive checks needed |
 | `STRONG_SIGNAL_CONFIRMATION_REQUIRED` | 1 | Fast-track when multiple signals combine |
 | `PCR_VOLATILITY_WINDOW` | 8 | Snapshot window for avg ΔPCR |
 | `PCR_VOLATILITY_MULTIPLIER` | 2.0 | Multiplier for dynamic threshold |
 | `DIRECTION_ROLLING_WINDOW` | 3 | Snapshots for rolling direction |
-| `SUPERTREND_PERIOD` | 3 | Snapshots for SuperTrend (15 min) |
+| `SUPERTREND_PERIOD` | 5 | Snapshots for SuperTrend (30 min) |
 | `SUPERTREND_MULTIPLIER` | 3.0 | ATR multiplier for SuperTrend bands |
-| `EXIT_COOLDOWN_MINUTES` | 15 | Cooldown after OI-based exit (reduced from 30) |
-| `EXIT_CONFIDENCE_THRESHOLD` | 50 | Minimum confidence % to fire |
-| `PRICE_CONFIRMATION_PCT` | 0.5 | Min price move (now confidence booster, not gate) |
+| `EXIT_COOLDOWN_MINUTES` | 15 | Cooldown after OI-based exit |
+| `PRICE_CONFIRMATION_PCT` | 0.5 | Min price move percentage (now confidence booster) |
 | `DAYS_TO_EXPIRY_DAMPENING` | 2 | Expiry proximity threshold |
 | `TIME_DECAY_FACTOR` | 1.5 | PCR threshold multiplier near expiry |
 | `HARD_STOP_LOSS_PCT` | 1.0 | Hard stop-loss % from entry |
 | `TRAILING_STOP_PCT` | 0.5 | Trailing stop pullback % from peak |
-| `LOSS_CAP_PCT` | 2.0 | Maximum acceptable loss % |
+| `LOSS_CAP_PCT` | 2.0 | Unused loss cap parameter (declared but superseded) |
 | `AFTERNOON_THRESHOLD_MULTIPLIER` | 0.5 | PCR threshold tightener after 2:30 PM |
 
 ### Scheduler Constants
 
 | Parameter | Value |
 |-----------|-------|
-| `MARKET_START` | 9:30 AM IST |
+| `MARKET_START` | 9:15 AM IST |
 | `PREDICTION_TIME` | 10:00 AM IST |
 | `MARKET_CLOSE` | 3:30 PM IST |
 | `SIX_MINUTES_MS` | 360,000 ms |
@@ -431,6 +431,7 @@ topOiBuildUp: List<OiStrikeInfo>
 largestPeOiStrike: BigDecimal
 largestCeOiStrike: BigDecimal
 strikePremiums: List<StrikePremium>
+marketSentiment: BigDecimal
 ```
 
 ### `OiStrikeInfo` (record, nested in `OiDataSnapshot`)
@@ -447,6 +448,8 @@ pchangeInOi: BigDecimal
 strikePrice: BigDecimal
 pePremium: BigDecimal
 cePremium: BigDecimal
+peIv: BigDecimal
+ceIv: BigDecimal
 ```
 
 ### `OiAnalysisResult` (record)
@@ -462,12 +465,13 @@ vix: BigDecimal
 indexOpen: BigDecimal
 largestPeOiStrike: BigDecimal
 largestCeOiStrike: BigDecimal
+marketSentiment: BigDecimal
 ```
 
 ### `ExitSignal` (enum)
 ```
 NONE, PCR_SHIFT, DIRECTION_REVERSAL, SUPERTREND_REVERSAL, OI_SURGE,
-HARD_STOP, TRAILING_STOP
+HARD_STOP, TRAILING_STOP, STRIKE_BREACH, PROFIT_TARGET, TIME_SQOFF
 ```
 
 ### `ExitAssessment` (record, nested in `OiAnalysisService`)
@@ -521,21 +525,21 @@ exitFraction: BigDecimal  (0.0-1.0, e.g., 0.5 = exit 50%)
 - Confirmation lag (2 consecutive checks required)
 
 ### Loss Minimization Improvements
-- **Hard stop-loss (1%)**: Price-based, checked before OI signals, skips cooldown
-- **Trailing stop-loss (0.5%)**: Locks in profits, only fires when in profit
-- **Loss cap (2%)**: Maximum acceptable drawdown before forced exit
+- **Hard stop-loss (premium doubled or sold leg >= 2.5×)**: Checked before OI signals, skips cooldown
+- **Trailing stop-loss (0.5% pullback of underlying)**: Locks in profits, only fires when in profit
+- **Loss cap (2%)**: Unused config constant, superseded by premium-based hard stop and underlying trailing stop
 - **Price confirmation → confidence booster**: No longer blocks exits, adds +10 confidence
 - **Early warning alerts**: Telegram on first OI signal detection (pre-confirmation)
 - **Strong signal fast-track**: Combined signals skip to 1 confirmation
-- **SuperTrend reversal**: New exit signal type (50% partial exit)
+- **SuperTrend reversal**: New exit signal type (50% partial exit, period 5)
 - **Afternoon tightening**: PCR thresholds halved after 2:30 PM
 - **Cooldown reduced**: 30 → 15 minutes, skipped entirely for price-based stops
 
 ### Dual Index & Premium-Based Strike Selection (latest)
 - **Day-of-week routing**: Mon/Tue/Fri → Nifty (50-pt strikes), Wed/Thu → Sensex (100-pt strikes)
-- **Premium-based strikes**: Sell at ₹30-40 premium, hedge at ~₹10 (credit spreads)
+- **Premium-based strikes**: Sell at ₹30-40 premium, hedge at ~₹10 (Directional Put/Call Selling or Iron Condor)
 - **VIX integration**: Fetched from NSE, displayed with day range (open ± open × vix / 1600)
 - **Largest OI strikes**: Max PE/CE OI levels shown in prediction
-- **Position sizing**: ₹10L capital, 0.6% target (₹6K), 1% SL (₹10K), lot-size aware
+- **Position sizing**: ₹10L capital, dynamic lot allocation based on confidence and margins (lot size 65 for Nifty, 20 for Sensex)
 - **StrikePremium data**: Per-strike PE/CE premiums stored in snapshots for live selection
 - **Build configuration cache**: Enabled for faster rebuilds

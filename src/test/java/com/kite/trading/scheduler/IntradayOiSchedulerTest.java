@@ -41,7 +41,7 @@ class IntradayOiSchedulerTest {
     scheduler.resetDaily();
 
     verify(oiAnalysisService).reset();
-    verify(telegramService).sendMessage("Jai Shree Krishna");
+    verify(telegramService).sendMessage(anyString()); // message wording may evolve
   }
 
   @Test

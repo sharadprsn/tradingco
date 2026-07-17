@@ -1,6 +1,6 @@
 # Kite Trading — OI-Based Intraday Monitor (Nifty & Sensex)
 
-A Spring Boot application that monitors NSE Nifty/Sensex option chain data in real time, computes Put-Call Ratio (PCR) and Open Interest (OI) buildup, predicts intraday direction at 9:45 AM, auto-enters a credit spread / short strangle at 9:50 AM, and monitors positions with a multi-layered exit strategy — all via Telegram. Data is persisted to an embedded H2 database and used by an in-process RandomForest ML model for direction prediction.
+A Spring Boot application that monitors NSE Nifty/Sensex option chain data in real time, computes Put-Call Ratio (PCR) and Open Interest (OI) buildup, alerts a Calendar Spread recommendation via Telegram once the OI has stabilized, and monitors positions with a multi-layered exit strategy. Data is persisted to an embedded H2 database and used by an in-process RandomForest ML model for direction prediction.
 
 ## Features
 
@@ -8,14 +8,14 @@ A Spring Boot application that monitors NSE Nifty/Sensex option chain data in re
 - **OI Analysis** — Fetches NSE option chain every 6 minutes, filters near ATM strikes
 - **Direction Prediction** — Bullish/Bearish/Neutral based on PE vs CE OI change dominance (60% threshold)
 - **Delta-Based Strike Selection** — Primary: Black-Scholes delta 0.15; fallback: ₹30-40 premium range
-- **Position Sizing** — Based on ₹10L capital, 0.6% target (₹6K), 1% SL (₹10K), 16 lots
-- **Multi-Layer Exit Strategy** — Hard stop (2× premium), trailing stop (0.5% pullback), profit target (80% decay), PCR shift, direction reversal, SuperTrend, OI surge, strike breach, time square-off (3:10 PM)
+- **Position Sizing** — Based on ₹10L capital, dynamic lot allocation based on confidence and margins
+- **Multi-Layer Exit Strategy** — Hard stop (2× net premium or 2.5× sold leg), trailing stop (0.5% pullback of underlying), profit target (80% decay), PCR shift (dynamic threshold), direction reversal (rolling window), SuperTrend (period 5), OI surge (3% of total open interest), strike breach, time square-off (3:10 PM)
 - **H2 Database Persistence** — All snapshots persisted with VIX + index OHLC, stored on host in `./data/`
 - **CSV Data Export** — REST endpoint for ML training data download
 - **In-Process ML Model** — RandomForest (200 trees) trained daily at 4 PM from persisted snapshot data; predicts direction + confidence
-- **Telegram Notifications** — 9:45 AM prediction, OI updates (threshold-gated), exit alerts, direction changes, training results
+- **Telegram Notifications** — Calendar Spread recommendation (when stable), OI updates (threshold-gated), exit alerts, training results
 - **Startup Health Check** — Verifies NSE connectivity and Telegram bot on startup
-- **Docker** — Multi-stage build, JRE Alpine, non-root user, health check
+- **Docker** — Multi-stage build, JRE Alpine, non-root user, health check (HTTPS support)
 
 ## Prerequisites
 
@@ -90,7 +90,7 @@ src/main/java/com/kite/trading/
 └── service/
     ├── OiAnalysisService.java           # Core OI analysis engine + H2 persist + ML integration
     ├── NseOptionChainClient.java        # NSE API client (primary)
-    ├── YahooFinanceOptionChainClient.java  # Fallback option chain client
+    ├── BseOptionChainClient.java            # BSE option chain client
     ├── FallbackOptionChainClient.java    # @Primary orchestrator with retry
     ├── TelegramService.java             # Telegram messaging
     ├── ml/
@@ -105,11 +105,11 @@ src/main/java/com/kite/trading/
 ```
 NSE API ──► NseOptionChainClient ──► OiAnalysisService ──► TelegramService
          (every 6 min)                  │                        │
-                                        ├─ in-memory snapshots    ├─ 9:45 AM prediction
+                                        ├─ in-memory snapshots    ├─ Calendar Spread Alert
                                         ├─ H2 persistence         ├─ OI updates
                                         ├─ direction prediction   ├─ exit alerts
-                                        ├─ exit signal check      ├─ direction changes
-                                        └─ MlService.inject()     └─ training results
+                                        ├─ exit signal check      └─ training results
+                                        └─ MlService.inject()
                                               │
                                               ▼
                                         RandomForest (in-process)
@@ -122,13 +122,12 @@ NSE API ──► NseOptionChainClient ──► OiAnalysisService ──► Tel
 | Trigger | Content |
 |---------|---------|
 | **Startup** | Application initialized — NSE & Telegram OK |
-| **9:45 AM Prediction** | Direction, confidence %, PCR, VIX, day range, largest PE/CE OI, open, strategy, strikes, trade recommendation with position sizing & OI reasoning |
-| **Direction Change** | Updated prediction mid-day when OI buildup shifts |
+| **Calendar Spread Alert** | Direction, confidence %, PCR, VIX, day range, largest PE/CE OI, open, suggested strategy, Calendar Spread strikes, trade recommendation, and stability logs |
 | **OI Update** (6 min) | Current PCR, PE/CE OI + change, top buildup strikes (skipped if change < thresholds) |
-| **Exit Signal** | Reason (HARD STOP / PROFIT TARGET / PCR SHIFT / DIRECTION REVERSAL / SUPERTREND / TIME SQOFF), confidence, exit fraction |
+| **Exit Signal** | Reason (HARD STOP / PROFIT TARGET / PCR SHIFT / DIRECTION REVERSAL / SUPERTREND / STRIKE BREACH / TIME SQOFF), confidence, exit fraction |
 | **Early Warning** | Pre-confirmation alert when OI-based signal first detected |
-| **Market Close** (4 PM) | Summary: 9:45 vs 3:30 index levels + movement |
-| **ML Training** (4 PM) | Model retrained: OOB score, samples |
+| **Market Close** (4 PM) | Summary: 9:15 AM vs 3:30 PM index levels + movement |
+| **ML Training** (4 PM) | Model retrained: OOB score, samples, accuracy metrics |
 
 ### Thresholds (noise reduction)
 
@@ -141,14 +140,11 @@ NSE API ──► NseOptionChainClient ──► OiAnalysisService ──► Tel
 | Time (IST) | Action |
 |------------|--------|
 | 9:00 AM | Reset daily state — clear in-memory snapshots, flags |
-| 9:15 AM | `shouldRun()` enables — first OI snapshot of the day |
-| 9:15 AM – 9:45 AM | OI snapshots recorded every 6 minutes |
-| 9:45 AM | `notifyPrediction()` → direction prediction sent via Telegram |
-| 9:50 AM | `markPositionEntered()` → auto-entry trigger |
-| 9:50 AM – 3:30 PM | OI snapshots + direction change checks + exit monitoring every 6 minutes |
+| 9:15 AM – 3:30 PM | Polls every 6 minutes: fetches option chain, records snapshots, checks stability to notify Calendar Spread alert, and checks exit signals if position is active |
 | 3:10 PM | Time-based square-off guard (inside exit assessment) |
-| 4:00 PM | Market close summary + ML training trigger |
+| 4:00 PM | Market close summary + ML training trigger + daily reset |
 | Weekends | `shouldRun()` returns `false`, no activity |
+
 
 ## API Endpoints
 
@@ -223,10 +219,11 @@ docker run -d --name kite-trading -p 443:443 --env-file .env sharadprsn/kite-tra
 
 | Test file | Tests | Covers |
 |-----------|-------|--------|
-| `OiAnalysisServiceTest` | 23 | PCR, ATM filter, direction prediction, thresholds, position lifecycle, reset, day-of-week routing, strikes, exit signals, delta calculation |
+| `OiAnalysisServiceTest` | 35 | PCR, ATM filter, direction prediction, thresholds, position lifecycle, reset, day-of-week routing, strikes, exit signals, delta calculation, stability gate logic |
 | `IntradayOiSchedulerTest` | 5 | shouldRun guard, reset, close summary, error handling |
 | `StartupHealthCheckTest` | 4 | NSE/Telegram success and failure paths |
 | `NseConnectivityTest` | 3 | NSE config URLs, option chain data validation |
+| `BseConnectivityTest` | 1 | BSE configuration and SENSEX option chain fetch validation |
 | `KiteTradingApplicationTests` | 1 | Context load |
 
 ## Project Conventions
@@ -250,16 +247,14 @@ docker run -d --name kite-trading -p 443:443 --env-file .env sharadprsn/kite-tra
 | `LOT_SIZE_NIFTY` | 65 | Nifty lot size (incl. buffer) |
 | `LOT_SIZE_SENSEX` | 20 | Sensex lot size (incl. buffer) |
 | `DEPLOYED_CAPITAL` | ₹10,00,000 | Position sizing base |
-| `TARGET_PCT` | 0.6% | Intraday profit target |
-| `STOP_LOSS_PCT` | 1.0% | Max loss per trade |
 | `EXIT_PCR_SHIFT` | 0.3 | Floor PCR shift threshold |
-| `EXIT_OI_SURGE` | 50 | OI surge exit trigger (contracts) |
+| `EXIT_OI_SURGE_PCT` | 0.03 (3%) | OI surge exit trigger fraction of total OI |
 | `PCR_VOLATILITY_WINDOW` | 8 | Snapshot window for dynamic PCR threshold |
 | `PCR_VOLATILITY_MULTIPLIER` | 2.0 | Multiplier for dynamic PCR threshold |
 | `DIRECTION_ROLLING_WINDOW` | 3 | Snapshots for rolling direction |
 | `CONFIRMATION_CONSECUTIVE` | 2 | Required confirmations for OI-based exits |
 | `EXIT_COOLDOWN_MINUTES` | 15 | Cooldown after OI-based exit |
-| `HARD_STOP_LOSS_PCT` | 1.0 | Hard stop % (triggers at 2× premium) |
+| `HARD_STOP_LOSS_PCT` | 1.0 | Hard stop % (triggers when net premium doubles or sold leg premium reaches 2.5×) |
 | `TRAILING_STOP_PCT` | 0.5 | Trailing stop pullback % from best price |
 | `AFTERNOON_THRESHOLD_MULTIPLIER` | 0.5 | PCR thresholds halved after 2:30 PM |
 | `MIN_PCR_CHANGE_FOR_NOTIFICATION` | 0.05 | Min PCR change to send Telegram update |
@@ -267,5 +262,11 @@ docker run -d --name kite-trading -p 443:443 --env-file .env sharadprsn/kite-tra
 | `NEAR_STRIKE_RANGE` | 5 | ATM ± 5 strikes for OI aggregation |
 | `TOP_STRIKES_COUNT` | 5 | Top OI buildup strikes to track |
 | `MARGIN_PER_LOT` | ₹60,000 | Margin required per lot |
-| `SUPERTREND_PERIOD` | 3 | ATR period (15 min) |
+| `SUPERTREND_PERIOD` | 5 | ATR period (30 min) |
 | `SUPERTREND_MULTIPLIER` | 3.0 | ATR multiplier |
+| `OI_STABILITY_SNAPSHOTS` | 3 | Min consecutive reads before stability confirmed |
+| `PCR_STABILITY_MAX_VAR` | 0.05 | Max PCR swing across stability window |
+| `OI_SLOWDOWN_RATIO` | 0.50 | Latest OI change must be < 50% of first snapshot |
+| `OI_VELOCITY_MAX_PCT` | 30.0% | Max percent change in OI at any single strike |
+| `HIGH_CONFIDENCE_THRESHOLD` | 80% | Min confidence for Calendar Spread alert |
+| `CALENDAR_ALERT_COOLDOWN_MIN` | 30 | Cooldown (minutes) between Calendar Spread alerts |

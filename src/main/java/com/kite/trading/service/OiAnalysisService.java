@@ -84,6 +84,20 @@ public class OiAnalysisService {
 
   private static final BigDecimal MARGIN_PER_LOT = BigDecimal.valueOf(60_000);
 
+  // === OI Stability gate ===
+  private static final int OI_STABILITY_SNAPSHOTS =
+      3; // min consecutive reads before stability confirmed
+  private static final BigDecimal PCR_STABILITY_MAX_VAR =
+      BigDecimal.valueOf(0.05); // max PCR swing across window
+  private static final BigDecimal OI_SLOWDOWN_RATIO =
+      BigDecimal.valueOf(0.50); // latest OI Δ must be < 50% of first
+  private static final BigDecimal OI_VELOCITY_MAX_PCT =
+      BigDecimal.valueOf(30.0); // no strike > 30% pChange
+
+  // === Calendar alert gate ===
+  private static final BigDecimal HIGH_CONFIDENCE_THRESHOLD = BigDecimal.valueOf(80);
+  private static final long CALENDAR_ALERT_COOLDOWN_MIN = 30; // minutes between repeated alerts
+
   private final OptionChainClient optionChainClient;
   private final TelegramService telegramService;
   private final OiSnapshotRepository snapshotRepository;
@@ -125,6 +139,7 @@ public class OiAnalysisService {
   private volatile BigDecimal entryLongCallPremium = BigDecimal.ZERO;
 
   private volatile String currentIndex = "NIFTY";
+  private volatile Instant lastCalendarAlertSentAt = Instant.MIN;
 
   String resolveIndexForDay() {
     return resolveIndexForDay(LocalDate.now(clock).getDayOfWeek());
@@ -667,7 +682,7 @@ public class OiAnalysisService {
           default -> "\uD83D\uDFE1";
         };
 
-    final String headerLabel = timeLabel != null ? timeLabel : "9:45 AM";
+    final String headerLabel = timeLabel != null ? timeLabel : "10:00 AM";
 
     final StringBuilder sb = new StringBuilder();
     sb.append(emoji)
@@ -737,6 +752,180 @@ public class OiAnalysisService {
     }
 
     sb.append("\n\nReasoning: ").append(result.reasoning());
+
+    return sb.toString();
+  }
+
+  /**
+   * Builds the focused Telegram alert for the dynamic calendar spread recommendation. Only called
+   * when OI is confirmed stable and confidence > 80%.
+   */
+  private String buildCalendarSpreadAlert(final OiAnalysisResult result) {
+    final DateTimeFormatter timeFmt = DateTimeFormatter.ofPattern("hh:mm a", Locale.ENGLISH);
+    final DateTimeFormatter dateFmt = DateTimeFormatter.ofPattern("dd-MMM", Locale.ENGLISH);
+    final String nowStr = LocalTime.now(IST).format(timeFmt);
+    final String dirEmoji = "BULLISH".equals(result.direction()) ? "\uD83D\uDFE2" : "\uD83D\uDD34";
+
+    final StringBuilder sb = new StringBuilder();
+    sb.append("\uD83D\uDDD3\uFE0F CALENDAR SPREAD ALERT  [")
+        .append(indexLabel())
+        .append(" | ")
+        .append(nowStr)
+        .append(" IST]")
+        .append("\nDirection: ")
+        .append(dirEmoji)
+        .append(" ")
+        .append(result.direction())
+        .append("  |  Confidence: ")
+        .append(result.confidence().setScale(0, RoundingMode.HALF_UP))
+        .append("%");
+
+    final BigDecimal sentiment =
+        result.marketSentiment() != null ? result.marketSentiment() : BigDecimal.ZERO;
+    final String sentType =
+        sentiment.compareTo(BigDecimal.ZERO) > 0
+            ? "Bullish"
+            : (sentiment.compareTo(BigDecimal.ZERO) < 0 ? "Bearish" : "Neutral");
+    sb.append("\nSentiment: \u2705 Confirmed (")
+        .append(sentiment.setScale(2, RoundingMode.HALF_UP))
+        .append(" ")
+        .append(sentType)
+        .append(")")
+        .append("\nOI Stability: \u2705 Confirmed (")
+        .append(OI_STABILITY_SNAPSHOTS)
+        .append(" reads");
+
+    // Show PCR stability range from the window
+    if (snapshots.size() >= OI_STABILITY_SNAPSHOTS) {
+      final List<OiDataSnapshot> window =
+          snapshots.subList(snapshots.size() - OI_STABILITY_SNAPSHOTS, snapshots.size());
+      final BigDecimal pcrMin =
+          window.stream()
+              .map(OiDataSnapshot::pcr)
+              .filter(p -> p != null)
+              .min(BigDecimal::compareTo)
+              .orElse(BigDecimal.ZERO);
+      final BigDecimal pcrMax =
+          window.stream()
+              .map(OiDataSnapshot::pcr)
+              .filter(p -> p != null)
+              .max(BigDecimal::compareTo)
+              .orElse(BigDecimal.ZERO);
+      sb.append(", PCR stable [")
+          .append(pcrMin.setScale(2, RoundingMode.HALF_UP))
+          .append("\u2013")
+          .append(pcrMax.setScale(2, RoundingMode.HALF_UP))
+          .append("]");
+    }
+    sb.append(")");
+
+    // Guard: need at least 2 expiries for a calendar spread
+    if (knownExpiryDates.size() < 2) {
+      sb.append(
+              "\n\n\u26A0\uFE0F Only one expiry available \u2014 calendar spread requires 2 expiries.")
+          .append("\n   Consider waiting for next-week options to become liquid.");
+      sb.append("\n\n\uD83D\uDCCA PCR: ").append(result.pcr().setScale(2, RoundingMode.HALF_UP));
+      if (result.vix() != null)
+        sb.append(" | VIX: ").append(result.vix().setScale(1, RoundingMode.HALF_UP));
+      return sb.toString();
+    }
+
+    final String nearExpiry = knownExpiryDates.get(0).format(dateFmt);
+    final String nextExpiry = knownExpiryDates.get(1).format(dateFmt);
+    final BigDecimal spot = snapshots.isEmpty() ? null : snapshots.getLast().underlyingValue();
+
+    // ── BULLISH → Bull Calendar Spread (PE wall as support) ────────────────────
+    if ("BULLISH".equals(result.direction())
+        && result.largestPeOiStrike() != null
+        && result.largestPeOiStrike().compareTo(BigDecimal.ZERO) > 0) {
+
+      final BigDecimal wall = result.largestPeOiStrike().setScale(0, RoundingMode.HALF_UP);
+      sb.append("\n\n\uD83D\uDFE2 BULL CALENDAR SPREAD  [Support Wall = ").append(wall).append("]");
+      if (spot != null && spot.compareTo(BigDecimal.ZERO) > 0) {
+        final BigDecimal distPct =
+            spot.subtract(wall)
+                .abs()
+                .multiply(BigDecimal.valueOf(100))
+                .divide(spot, 1, RoundingMode.HALF_UP);
+        sb.append("  (").append(distPct).append("% OTM)");
+      }
+      sb.append("\n   SELL ")
+          .append(wall)
+          .append(" PE  (")
+          .append(nearExpiry)
+          .append(")")
+          .append("   \u2190 near-expiry: high theta decay \u2014 premium you collect")
+          .append("\n   BUY  ")
+          .append(wall)
+          .append(" PE  (")
+          .append(nextExpiry)
+          .append(")")
+          .append("   \u2190 next-expiry: long vega \u2014 gains when VIX spikes on sudden move")
+          .append("\n\n   Entry    : Now \u2014 OI settled, direction confirmed at ")
+          .append(nowStr)
+          .append("\n   Target   : Close when near-leg premium falls 50%  \u2500 take profit")
+          .append(
+              "\n   Hard SL  : Close if near-leg premium DOUBLES (2\u00D7)  \u2500 capital protection")
+          .append("\n   Breach SL: Exit immediately if spot CLOSES BELOW ")
+          .append(wall)
+          .append("\n   Square-off: 3:10 PM IST  (avoid closing-hour gamma squeeze)");
+    }
+
+    // ── BEARISH → Bear Calendar Spread (CE wall as resistance) ─────────────────
+    if ("BEARISH".equals(result.direction())
+        && result.largestCeOiStrike() != null
+        && result.largestCeOiStrike().compareTo(BigDecimal.ZERO) > 0) {
+
+      final BigDecimal wall = result.largestCeOiStrike().setScale(0, RoundingMode.HALF_UP);
+      sb.append("\n\n\uD83D\uDD34 BEAR CALENDAR SPREAD  [Resistance Wall = ")
+          .append(wall)
+          .append("]");
+      if (spot != null && spot.compareTo(BigDecimal.ZERO) > 0) {
+        final BigDecimal distPct =
+            wall.subtract(spot)
+                .abs()
+                .multiply(BigDecimal.valueOf(100))
+                .divide(spot, 1, RoundingMode.HALF_UP);
+        sb.append("  (").append(distPct).append("% OTM)");
+      }
+      sb.append("\n   SELL ")
+          .append(wall)
+          .append(" CE  (")
+          .append(nearExpiry)
+          .append(")")
+          .append("   \u2190 near-expiry: high theta decay \u2014 premium you collect")
+          .append("\n   BUY  ")
+          .append(wall)
+          .append(" CE  (")
+          .append(nextExpiry)
+          .append(")")
+          .append("   \u2190 next-expiry: long vega \u2014 gains when VIX spikes on sudden move")
+          .append("\n\n   Entry    : Now \u2014 OI settled, direction confirmed at ")
+          .append(nowStr)
+          .append("\n   Target   : Close when near-leg premium falls 50%  \u2500 take profit")
+          .append(
+              "\n   Hard SL  : Close if near-leg premium DOUBLES (2\u00D7)  \u2500 capital protection")
+          .append("\n   Breach SL: Exit immediately if spot CLOSES ABOVE ")
+          .append(wall)
+          .append("\n   Square-off: 3:10 PM IST  (avoid closing-hour gamma squeeze)");
+    }
+
+    // ── Why Calendar ────────────────────────────────────────────────────────────
+    sb.append("\n\n\uD83D\uDEE1\uFE0F Why Calendar over naked sell?")
+        .append(
+            "\n   \u2022 Sudden move + VIX spike \u2192 long next-expiry GAINS MORE than near-expiry loses")
+        .append("\n   \u2022 Max Loss = net debit paid  (NOT unlimited like naked sell)")
+        .append(
+            "\n   \u2022 Theta works for you: near-expiry decays faster \u2192 net positive theta daily");
+
+    // ── Snapshot summary ────────────────────────────────────────────────────────
+    sb.append("\n\n\uD83D\uDCCA PCR: ").append(result.pcr().setScale(2, RoundingMode.HALF_UP));
+    if (result.vix() != null)
+      sb.append(" | VIX: ").append(result.vix().setScale(1, RoundingMode.HALF_UP));
+    if (spot != null) sb.append(" | Spot: ").append(spot.setScale(0, RoundingMode.HALF_UP));
+    sb.append(" | Reads: ").append(snapshots.size());
+    if (result.reasoning() != null && !result.reasoning().isBlank())
+      sb.append("\n\uD83D\uDCCB ").append(result.reasoning());
 
     return sb.toString();
   }
@@ -833,7 +1022,7 @@ public class OiAnalysisService {
     }
     final OiAnalysisResult result = analyzeAndPredict();
     if (result != null) {
-      final String report = buildPredictionReport(result, "9:45 AM");
+      final String report = buildPredictionReport(result, "10:00 AM");
       telegramService.sendMessage(report);
       predictionSentToday = true;
       initialPredictionDirection = result.direction();
@@ -849,6 +1038,146 @@ public class OiAnalysisService {
       }
       logger.info("Prediction sent via Telegram: {}", result.direction());
     }
+  }
+
+  /**
+   * Called by the scheduler every 10 minutes. Sends a Calendar Spread Telegram alert only when ALL
+   * conditions are met: 1. OI data has stabilised (3+ reads, PCR stable, OI change rate
+   * decelerating) 2. Directional confidence > 80% 3. Direction is not NEUTRAL (calendar spread
+   * needs a bias) 4. 30-minute cooldown since last alert has elapsed
+   */
+  public void checkStabilityAndNotify() {
+    if (snapshots.size() < OI_STABILITY_SNAPSHOTS) {
+      logger.debug(
+          "Stability check: {} snapshot(s) collected so far, need {}",
+          snapshots.size(),
+          OI_STABILITY_SNAPSHOTS);
+      return;
+    }
+
+    if (!isOiStable()) {
+      logger.info(
+          "OI not yet stable after {} snapshots — skipping calendar alert", snapshots.size());
+      return;
+    }
+
+    final OiAnalysisResult result = analyzeAndPredict();
+    if (result == null) return;
+
+    if (result.confidence().compareTo(HIGH_CONFIDENCE_THRESHOLD) < 0) {
+      logger.info(
+          "Confidence {}% is below {}% threshold — no alert",
+          result.confidence().setScale(0, RoundingMode.HALF_UP), HIGH_CONFIDENCE_THRESHOLD);
+      return;
+    }
+
+    if ("NEUTRAL".equals(result.direction())) {
+      logger.info("Direction is NEUTRAL — calendar spread requires directional bias, skipping");
+      return;
+    }
+
+    final BigDecimal sentiment =
+        result.marketSentiment() != null ? result.marketSentiment() : BigDecimal.ZERO;
+    if ("BULLISH".equals(result.direction()) && sentiment.compareTo(BigDecimal.ZERO) < 0) {
+      logger.info(
+          "Direction is BULLISH but market sentiment is negative ({}) — skipping alert due to sentiment mismatch",
+          sentiment.setScale(2, RoundingMode.HALF_UP));
+      return;
+    }
+    if ("BEARISH".equals(result.direction()) && sentiment.compareTo(BigDecimal.ZERO) > 0) {
+      logger.info(
+          "Direction is BEARISH but market sentiment is positive ({}) — skipping alert due to sentiment mismatch",
+          sentiment.setScale(2, RoundingMode.HALF_UP));
+      return;
+    }
+
+    final long minutesSinceLast =
+        Duration.between(lastCalendarAlertSentAt, Instant.now(clock)).toMinutes();
+    if (minutesSinceLast < CALENDAR_ALERT_COOLDOWN_MIN) {
+      logger.debug(
+          "Calendar alert on cooldown ({}/{} min elapsed)",
+          minutesSinceLast,
+          CALENDAR_ALERT_COOLDOWN_MIN);
+      return;
+    }
+
+    final String message = buildCalendarSpreadAlert(result);
+    telegramService.sendMessage(message);
+    lastCalendarAlertSentAt = Instant.now(clock);
+    logger.info(
+        "Calendar spread alert sent: direction={}, confidence={}",
+        result.direction(),
+        result.confidence().setScale(0, RoundingMode.HALF_UP));
+  }
+
+  /**
+   * Returns true when OI data across the last {@value #OI_STABILITY_SNAPSHOTS} snapshots satisfies
+   * all three stability conditions: 1. PCR variance < 0.05 (market direction not rapidly shifting)
+   * 2. OI change rate has decelerated to < 50% of the opening burst 3. No strike has pchangeInOi >
+   * 30% (no aggressive institutional repositioning)
+   */
+  public boolean isOiStable() {
+    if (snapshots.size() < OI_STABILITY_SNAPSHOTS) return false;
+
+    final List<OiDataSnapshot> window =
+        snapshots.subList(snapshots.size() - OI_STABILITY_SNAPSHOTS, snapshots.size());
+
+    // Condition 1: PCR must not swing more than PCR_STABILITY_MAX_VAR across the window
+    final BigDecimal pcrMin =
+        window.stream()
+            .map(OiDataSnapshot::pcr)
+            .filter(p -> p != null)
+            .min(BigDecimal::compareTo)
+            .orElse(BigDecimal.ZERO);
+    final BigDecimal pcrMax =
+        window.stream()
+            .map(OiDataSnapshot::pcr)
+            .filter(p -> p != null)
+            .max(BigDecimal::compareTo)
+            .orElse(BigDecimal.ZERO);
+    if (pcrMax.subtract(pcrMin).compareTo(PCR_STABILITY_MAX_VAR) > 0) {
+      logger.debug(
+          "OI stability: PCR variance {} exceeds threshold {}",
+          pcrMax.subtract(pcrMin).setScale(3, RoundingMode.HALF_UP),
+          PCR_STABILITY_MAX_VAR);
+      return false;
+    }
+
+    // Condition 2: OI change rate must be decelerating
+    final BigDecimal firstOiDelta =
+        safeOi(window.get(0).totalPeOiChange())
+            .abs()
+            .add(safeOi(window.get(0).totalCeOiChange()).abs());
+    final BigDecimal latestOiDelta =
+        safeOi(window.get(window.size() - 1).totalPeOiChange())
+            .abs()
+            .add(safeOi(window.get(window.size() - 1).totalCeOiChange()).abs());
+    if (firstOiDelta.compareTo(BigDecimal.ZERO) > 0) {
+      final BigDecimal slowdownRatio = latestOiDelta.divide(firstOiDelta, 2, RoundingMode.HALF_UP);
+      if (slowdownRatio.compareTo(OI_SLOWDOWN_RATIO) > 0) {
+        logger.debug(
+            "OI stability: change rate still high (ratio={}, threshold={})",
+            slowdownRatio,
+            OI_SLOWDOWN_RATIO);
+        return false;
+      }
+    }
+
+    // Condition 3: No aggressive OI velocity at any strike
+    for (final OiDataSnapshot snap : window) {
+      if (snap.topOiBuildUp() == null) continue;
+      for (final OiDataSnapshot.OiStrikeInfo info : snap.topOiBuildUp()) {
+        if (info.pchangeInOi() == null) continue;
+        if (info.pchangeInOi().abs().compareTo(OI_VELOCITY_MAX_PCT) > 0) {
+          logger.debug(
+              "OI stability: high velocity {:.1f}% at strike {} — institutions repositioning",
+              info.pchangeInOi(), info.strikePrice());
+          return false;
+        }
+      }
+    }
+
+    return true;
   }
 
   public void reprocessPrediction(final String timeLabel) {
@@ -1102,11 +1431,16 @@ public class OiAnalysisService {
     entrySoldPremium = BigDecimal.ZERO;
     entryHedgeStrike = BigDecimal.ZERO;
     entryHedgePremium = BigDecimal.ZERO;
+    lastCalendarAlertSentAt = Instant.MIN;
     logger.info("OI Analysis Service reset");
   }
 
   public List<OiDataSnapshot> getSnapshots() {
     return List.copyOf(snapshots);
+  }
+
+  public void addSnapshotForTesting(final OiDataSnapshot snapshot) {
+    this.snapshots.add(snapshot);
   }
 
   public OiAnalysisResult getLastAnalysis() {
@@ -1259,6 +1593,269 @@ public class OiAnalysisService {
           .append(" - ")
           .append(upper.setScale(0, RoundingMode.HALF_UP));
     }
+
+    // ─── LOW RISK OI STRATEGY (Defined-Risk Spreads + Safety Filters) ─────────
+    final BigDecimal maxPeStrike = latest.largestPeOiStrike();
+    final BigDecimal maxCeStrike = latest.largestCeOiStrike();
+    final boolean hasPeWall = maxPeStrike != null && maxPeStrike.compareTo(BigDecimal.ZERO) > 0;
+    final boolean hasCeWall = maxCeStrike != null && maxCeStrike.compareTo(BigDecimal.ZERO) > 0;
+    final BigDecimal wingOffset = BigDecimal.valueOf((long) strikeInterval() * 3);
+    final BigDecimal spot = latest.underlyingValue();
+    final BigDecimal pcr = latest.pcr();
+
+    if (hasPeWall || hasCeWall) {
+      rec.append("\n\n\uD83D\uDEE1\uFE0F LOW RISK OI STRATEGY (Defined-Risk Spreads):");
+
+      // ─── Safety Filters ────────────────────────────────────────────────────
+      // Filter 1: OI Wall Proximity — leg is risky if wall < 1.5% from spot
+      final BigDecimal MIN_OTM_PCT = BigDecimal.valueOf(1.5);
+      boolean peWallTooClose = false;
+      boolean ceWallTooClose = false;
+      BigDecimal peDistPct = null;
+      BigDecimal ceDistPct = null;
+      if (hasPeWall && spot != null && spot.compareTo(BigDecimal.ZERO) > 0) {
+        peDistPct =
+            spot.subtract(maxPeStrike)
+                .abs()
+                .multiply(BigDecimal.valueOf(100))
+                .divide(spot, 2, RoundingMode.HALF_UP);
+        peWallTooClose = peDistPct.compareTo(MIN_OTM_PCT) < 0;
+      }
+      if (hasCeWall && spot != null && spot.compareTo(BigDecimal.ZERO) > 0) {
+        ceDistPct =
+            maxCeStrike
+                .subtract(spot)
+                .abs()
+                .multiply(BigDecimal.valueOf(100))
+                .divide(spot, 2, RoundingMode.HALF_UP);
+        ceWallTooClose = ceDistPct.compareTo(MIN_OTM_PCT) < 0;
+      }
+
+      // Filter 2: PCR Directional Bias — extreme PCR signals directional pressure
+      // PCR > 1.5 = strong bullish bias (CE wall may get breached on momentum)
+      // PCR < 0.5 = strong bearish flush (PE wall may collapse fast)
+      final BigDecimal PCR_HIGH = BigDecimal.valueOf(1.5);
+      final BigDecimal PCR_LOW = BigDecimal.valueOf(0.5);
+      final boolean pcrBullishExtreme = pcr != null && pcr.compareTo(PCR_HIGH) > 0;
+      final boolean pcrBearishExtreme = pcr != null && pcr.compareTo(PCR_LOW) < 0;
+
+      // Filter 3: OI Velocity — detect rapid OI buildup at wall strike (>50% pChange)
+      // Fast OI addition near a wall = institutions repositioning = directional move incoming
+      final BigDecimal OI_VELOCITY_THRESH = BigDecimal.valueOf(50.0);
+      boolean peWallUnderPressure = false;
+      boolean ceWallUnderPressure = false;
+      if (latest.topOiBuildUp() != null) {
+        for (final OiDataSnapshot.OiStrikeInfo info : latest.topOiBuildUp()) {
+          if (info.pchangeInOi() == null) continue;
+          final boolean isNearPeWall =
+              hasPeWall
+                  && info.strikePrice()
+                          .subtract(maxPeStrike)
+                          .abs()
+                          .compareTo(BigDecimal.valueOf(strikeInterval()))
+                      <= 0;
+          final boolean isNearCeWall =
+              hasCeWall
+                  && info.strikePrice()
+                          .subtract(maxCeStrike)
+                          .abs()
+                          .compareTo(BigDecimal.valueOf(strikeInterval()))
+                      <= 0;
+          if (isNearPeWall && info.pchangeInOi().abs().compareTo(OI_VELOCITY_THRESH) > 0)
+            peWallUnderPressure = true;
+          if (isNearCeWall && info.pchangeInOi().abs().compareTo(OI_VELOCITY_THRESH) > 0)
+            ceWallUnderPressure = true;
+        }
+      }
+
+      // ── Bull Put Spread ──────────────────────────────────────────────────────
+      if (hasPeWall) {
+        final BigDecimal pe0 = maxPeStrike.setScale(0, RoundingMode.HALF_UP);
+        final BigDecimal peHedge =
+            maxPeStrike.subtract(wingOffset).setScale(0, RoundingMode.HALF_UP);
+        final BigDecimal spreadWidth = pe0.subtract(peHedge);
+
+        // Compute per-leg signal
+        final boolean peSafe = !peWallTooClose && !pcrBearishExtreme && !peWallUnderPressure;
+        final String peSignal =
+            peSafe ? "\u2705 SAFE TO ENTER" : "\u26A0\uFE0F WAIT — see warnings";
+
+        rec.append("\n\n\uD83D\uDFE2 BULL PUT SPREAD  [Support Wall = ")
+            .append(pe0)
+            .append("]  ")
+            .append(peSignal)
+            .append("\n   SELL ")
+            .append(pe0)
+            .append(" PE (")
+            .append(expiry)
+            .append(")")
+            .append("  \u2190 Max PE OI wall — strong support")
+            .append("\n   BUY  ")
+            .append(peHedge)
+            .append(" PE (")
+            .append(expiry)
+            .append(")")
+            .append("  \u2190 Hedge wing — defined max loss")
+            .append("\n   Spread Width  : ")
+            .append(spreadWidth)
+            .append(" pts")
+            .append("\n   Entry         : Sell spread as a single order after 10:00 AM")
+            .append("\n   Target        : Close when short leg premium falls 50%")
+            .append("\n   Hard SL       : Close spread if short leg premium DOUBLES (2\u00D7)")
+            .append("\n   Breach SL     : Close immediately if spot CLOSES BELOW ")
+            .append(pe0)
+            .append("\n   Square-off    : 3:10 PM IST (avoid closing-hour gamma squeeze)");
+
+        // Per-leg warnings
+        if (peWallTooClose && peDistPct != null)
+          rec.append("\n   \u26D4 PROXIMITY RISK : PE wall is only ")
+              .append(peDistPct)
+              .append("% OTM — any small dip can threaten the strike. Min required: 1.5%.");
+        if (pcrBearishExtreme && pcr != null)
+          rec.append("\n   \u26D4 PCR ALERT      : PCR=")
+              .append(pcr.setScale(2, RoundingMode.HALF_UP))
+              .append(" is extreme BEARISH (<0.5). Put demand is very high — avoid PE selling.");
+        if (peWallUnderPressure)
+          rec.append("\n   \u26D4 OI VELOCITY    : Rapid OI buildup detected near PE wall.")
+              .append(" Institutions may be repositioning for a downside move.");
+      }
+
+      // ── Bear Call Spread ─────────────────────────────────────────────────────
+      if (hasCeWall) {
+        final BigDecimal ce0 = maxCeStrike.setScale(0, RoundingMode.HALF_UP);
+        final BigDecimal ceHedge = maxCeStrike.add(wingOffset).setScale(0, RoundingMode.HALF_UP);
+        final BigDecimal spreadWidth = ceHedge.subtract(ce0);
+
+        final boolean ceSafe = !ceWallTooClose && !pcrBullishExtreme && !ceWallUnderPressure;
+        final String ceSignal =
+            ceSafe ? "\u2705 SAFE TO ENTER" : "\u26A0\uFE0F WAIT — see warnings";
+
+        rec.append("\n\n\uD83D\uDD34 BEAR CALL SPREAD  [Resistance Wall = ")
+            .append(ce0)
+            .append("]  ")
+            .append(ceSignal)
+            .append("\n   SELL ")
+            .append(ce0)
+            .append(" CE (")
+            .append(expiry)
+            .append(")")
+            .append("  \u2190 Max CE OI wall — strong resistance")
+            .append("\n   BUY  ")
+            .append(ceHedge)
+            .append(" CE (")
+            .append(expiry)
+            .append(")")
+            .append("  \u2190 Hedge wing — defined max loss")
+            .append("\n   Spread Width  : ")
+            .append(spreadWidth)
+            .append(" pts")
+            .append("\n   Entry         : Sell spread as a single order after 10:00 AM")
+            .append("\n   Target        : Close when short leg premium falls 50%")
+            .append("\n   Hard SL       : Close spread if short leg premium DOUBLES (2\u00D7)")
+            .append("\n   Breach SL     : Close immediately if spot CLOSES ABOVE ")
+            .append(ce0)
+            .append("\n   Square-off    : 3:10 PM IST (avoid closing-hour gamma squeeze)");
+
+        if (ceWallTooClose && ceDistPct != null)
+          rec.append("\n   \u26D4 PROXIMITY RISK : CE wall is only ")
+              .append(ceDistPct)
+              .append("% OTM — any small rally can threaten the strike. Min required: 1.5%.");
+        if (pcrBullishExtreme && pcr != null)
+          rec.append("\n   \u26D4 PCR ALERT      : PCR=")
+              .append(pcr.setScale(2, RoundingMode.HALF_UP))
+              .append(" is extreme BULLISH (>1.5). Call demand surge may breach CE wall.");
+        if (ceWallUnderPressure)
+          rec.append("\n   \u26D4 OI VELOCITY    : Rapid OI buildup detected near CE wall.")
+              .append(" Institutions may be repositioning for an upside breakout.");
+      }
+
+      // ── Iron Condor summary ──────────────────────────────────────────────────
+      if (hasPeWall && hasCeWall) {
+        rec.append("\n\n\uD83E\uDDB4 IRON CONDOR = Both spreads combined")
+            .append("\n   Max Profit : Net credit from both legs")
+            .append("\n   Max Loss   : Spread width − Net credit  (defined, never both triggered)")
+            .append("\n   Best used on NEUTRAL days when index is range-bound between OI walls.");
+      }
+
+      // ── Calendar Spread alternative (next-expiry hedge) ─────────────────────
+      // Available only when a second expiry exists in the chain
+      if (knownExpiryDates.size() >= 2) {
+        final DateTimeFormatter fmtCal = DateTimeFormatter.ofPattern("dd-MMM", Locale.ENGLISH);
+        final String nearExpiry = knownExpiryDates.get(0).format(fmtCal);
+        final String nextExpiry = knownExpiryDates.get(1).format(fmtCal);
+
+        rec.append(
+            "\n\n\uD83D\uDDD3\uFE0F CALENDAR SPREAD — Alternative Hedge vs Sudden Directional Move:");
+        rec.append("\n   Instead of a same-expiry wing, BUY the same strike on the NEXT expiry.");
+        rec.append(
+            "\n   This creates a vega-long position that profits when VIX spikes on a sudden move.");
+
+        if (hasPeWall) {
+          final BigDecimal pe0 = maxPeStrike.setScale(0, RoundingMode.HALF_UP);
+          rec.append("\n\n   \uD83D\uDFE2 PE Calendar:")
+              .append("\n      SELL ")
+              .append(pe0)
+              .append(" PE  (")
+              .append(nearExpiry)
+              .append(")")
+              .append("   \u2190 near-expiry: high theta decay")
+              .append("\n      BUY  ")
+              .append(pe0)
+              .append(" PE  (")
+              .append(nextExpiry)
+              .append(")")
+              .append("   \u2190 next-expiry: high vega, gains on VIX spike");
+        }
+        if (hasCeWall) {
+          final BigDecimal ce0 = maxCeStrike.setScale(0, RoundingMode.HALF_UP);
+          rec.append("\n\n   \uD83D\uDD34 CE Calendar:")
+              .append("\n      SELL ")
+              .append(ce0)
+              .append(" CE  (")
+              .append(nearExpiry)
+              .append(")")
+              .append("   \u2190 near-expiry: high theta decay")
+              .append("\n      BUY  ")
+              .append(ce0)
+              .append(" CE  (")
+              .append(nextExpiry)
+              .append(")")
+              .append("   \u2190 next-expiry: high vega, gains on VIX spike");
+        }
+
+        rec.append("\n\n   How it protects against sudden moves:")
+            .append(
+                "\n   \u2022 Sudden drop + VIX spikes \u2192 long next-expiry PE gains MORE than short near-expiry PE loses")
+            .append(
+                "\n   \u2022 Slow theta decay scenario  \u2192 near-expiry decays faster than next-expiry \u2192 net profit")
+            .append(
+                "\n   \u2022 Max loss = Net debit paid (cost of next-expiry \u2212 premium from near-expiry)")
+            .append("\n   \u2022 Unlike a wing, max loss does NOT scale with spread width")
+            .append("\n\n   When calendar is BETTER than same-expiry wing:")
+            .append(
+                "\n   \u2714 VIX > 14 (high base volatility — vega protection is more valuable)")
+            .append("\n   \u2714 Event risk day (RBI / Budget / Global news expected)")
+            .append("\n   \u2714 Nearing major support/resistance where a breakout is possible")
+            .append("\n\n   When same-expiry wing is BETTER:")
+            .append("\n   \u2714 VIX < 12 (low vol — vega protection is cheap but unnecessary)")
+            .append("\n   \u2714 Pure range-bound day, no catalysts expected")
+            .append("\n   \u2714 Liquidity: next-expiry OTM options may have wide bid-ask spreads")
+            .append(
+                "\n\n   \u26A0\uFE0F Note: SEBI may treat the two expiry legs as separate for margin.")
+            .append(" Check with broker if calendar margin benefit applies.");
+      }
+
+      rec.append("\n\n\uD83D\uDCCB SAFETY CHECKLIST before entry:")
+          .append("\n   \u2714 VIX < 18  (current: ")
+          .append(vix != null ? vix.setScale(1, RoundingMode.HALF_UP) : "N/A")
+          .append(")")
+          .append("\n   \u2714 Wall is \u22651.5% OTM from spot")
+          .append("\n   \u2714 PCR between 0.5 and 1.5  (not extreme directional)")
+          .append("\n   \u2714 No rapid OI buildup near the wall strikes")
+          .append("\n   \u2714 No major event (RBI/Fed/F&O expiry) today")
+          .append("\n   \u2714 Expiry is NOT same-day  (DTE \u22651)");
+    }
+    // ──────────────────────────────────────────────────────────────────────────
 
     return rec.toString();
   }

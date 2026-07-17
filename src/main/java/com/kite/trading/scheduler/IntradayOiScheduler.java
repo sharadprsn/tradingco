@@ -25,7 +25,6 @@ public class IntradayOiScheduler {
   private static final Logger logger = LoggerFactory.getLogger(IntradayOiScheduler.class);
   private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
   private static final LocalTime MARKET_START = LocalTime.of(9, 15);
-  private static final LocalTime PREDICTION_TIME_945 = LocalTime.of(9, 45);
   private static final LocalTime MARKET_CLOSE = LocalTime.of(15, 30);
   private static final int SIX_MINUTES_MS = 360_000;
 
@@ -34,10 +33,7 @@ public class IntradayOiScheduler {
   private final MlService mlService;
   private final OiSnapshotRepository snapshotRepository;
 
-  private volatile boolean prediction945Executed;
-  private volatile boolean autoEntryExecutedToday;
-
-  private static final LocalTime AUTO_ENTRY_TIME = LocalTime.of(9, 50);
+  // Dynamic stability gate — no fixed-time flags needed
 
   public IntradayOiScheduler(
       final OiAnalysisService oiAnalysisService,
@@ -60,26 +56,13 @@ public class IntradayOiScheduler {
     logger.debug("OI scheduler tick at {}", now);
 
     try {
+      // 1. Collect fresh OI snapshot
       oiAnalysisService.fetchAndRecordOi();
 
-      final boolean isPast945 = !now.isBefore(PREDICTION_TIME_945);
-      if (isPast945 && !prediction945Executed) {
-        oiAnalysisService.notifyPrediction();
-        prediction945Executed = true;
-        logger.info("9:45 AM prediction executed and sent via Telegram");
-      }
+      // 2. Check OI stability → if stable & confidence > 80%, fires Calendar Spread alert
+      oiAnalysisService.checkStabilityAndNotify();
 
-      if (prediction945Executed) {
-        oiAnalysisService.checkAndNotifyDirectionChange();
-      }
-
-      final boolean isPast950 = !now.isBefore(AUTO_ENTRY_TIME);
-      if (isPast950 && prediction945Executed && !autoEntryExecutedToday) {
-        oiAnalysisService.markPositionEntered();
-        autoEntryExecutedToday = true;
-        logger.info("9:50 AM automatic position entry executed");
-      }
-
+      // 3. If a position was manually entered, monitor for exit signals
       if (oiAnalysisService.isPositionEntered()) {
         oiAnalysisService.notifyExitIfNeeded();
       }
@@ -92,12 +75,11 @@ public class IntradayOiScheduler {
 
   @Scheduled(cron = "0 0 9 * * MON-FRI", zone = "Asia/Kolkata")
   public void resetDaily() {
-    logger.info("Resetting OI scheduler state for new trading day");
+    logger.info("Resetting OI state for new trading day — polling every 6 min from 9:15 AM");
     oiAnalysisService.reset();
-    prediction945Executed = false;
-    autoEntryExecutedToday = false;
-    telegramService.sendMessage("Jai Shree Krishna");
-    logger.info("Reset message sent via Telegram");
+    telegramService.sendMessage(
+        "🙏 Jai Shree Krishna — OI monitor active. Polling every 6 min from 9:15 AM.");
+    logger.info("Daily reset complete");
   }
 
   @Scheduled(cron = "0 0 16 * * MON-FRI", zone = "Asia/Kolkata")
@@ -105,17 +87,17 @@ public class IntradayOiScheduler {
     final var snapshots = oiAnalysisService.getSnapshots();
     if (!snapshots.isEmpty()) {
       final String indexLabel = oiAnalysisService.getCurrentIndexLabel();
-      final var first = findClosestTo(snapshots, LocalTime.of(9, 45));
+      final var first = findClosestTo(snapshots, LocalTime.of(9, 15));
       final var last = snapshots.getLast();
-      final BigDecimal val945 = first != null ? first.underlyingValue() : null;
+      final BigDecimal val915 = first != null ? first.underlyingValue() : null;
       final BigDecimal val1530 = last.underlyingValue();
       final String movement =
-          (val945 != null) ? String.format("%+.2f", val1530.subtract(val945)) : "N/A";
+          (val915 != null) ? String.format("%+.2f", val1530.subtract(val915)) : "N/A";
       final String summary =
-          "9:45 AM "
+          "9:15 AM "
               + indexLabel
               + ": "
-              + (val945 != null ? val945 : "N/A")
+              + (val915 != null ? val915 : "N/A")
               + "\n3:30 PM "
               + indexLabel
               + ": "
@@ -190,8 +172,6 @@ public class IntradayOiScheduler {
     }
 
     oiAnalysisService.reset();
-    prediction945Executed = false;
-    autoEntryExecutedToday = false;
   }
 
   private static OiDataSnapshot findClosestTo(

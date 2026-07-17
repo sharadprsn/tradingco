@@ -6,7 +6,7 @@ Strategy: Sell out-of-the-money options based on OI buildup direction.
   - CE OI buildup > 60% of total = BEARISH -> sell CALL  
   - Balanced = NEUTRAL -> short strangle (sell both)
 
-Data: Nifty 50 daily prices from Yahoo Finance (1 year)
+Data: Nifty 50 daily prices (1 year)
 Signals: Since NSE F&O historical OI data is blocked by anti-scraping,
          we use price-volume action as directional proxy.
          In production, OI data comes live from NSE option chain API.

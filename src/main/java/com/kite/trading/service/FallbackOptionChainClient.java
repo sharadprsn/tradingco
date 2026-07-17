@@ -18,12 +18,12 @@ public class FallbackOptionChainClient implements OptionChainClient {
       Set.of("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY");
 
   private final NseOptionChainClient nseClient;
-  private final OpenAlgoOptionChainClient openAlgoClient;
+  private final BseOptionChainClient bseClient;
 
   public FallbackOptionChainClient(
-      final NseOptionChainClient nseClient, final OpenAlgoOptionChainClient openAlgoClient) {
+      final NseOptionChainClient nseClient, final BseOptionChainClient bseClient) {
     this.nseClient = nseClient;
-    this.openAlgoClient = openAlgoClient;
+    this.bseClient = bseClient;
   }
 
   @Override
@@ -36,7 +36,11 @@ public class FallbackOptionChainClient implements OptionChainClient {
     if (NSE_SYMBOLS.contains(symbol)) {
       return fetchFromNse(symbol);
     }
-    return openAlgoClient.fetchOptionChain(symbol);
+    if ("SENSEX".equals(symbol)) {
+      return fetchFromBse();
+    }
+    logger.warn("Unsupported symbol: {}", symbol);
+    return null;
   }
 
   private OptionChainData fetchFromNse(final String symbol) {
@@ -60,14 +64,31 @@ public class FallbackOptionChainClient implements OptionChainClient {
       }
     }
 
-    logger.warn(
-        "NSE option chain failed after 3 attempts for {}, falling back to OpenAlgo", symbol);
-    final OptionChainData openAlgoData = openAlgoClient.fetchOptionChain(symbol);
-    if (isValid(openAlgoData)) {
-      return openAlgoData;
+    logger.warn("NSE option chain failed after 3 attempts for {}", symbol);
+    return null;
+  }
+
+  private OptionChainData fetchFromBse() {
+    OptionChainData bseData = bseClient.fetchOptionChain("SENSEX");
+    if (isValid(bseData)) {
+      return bseData;
     }
 
-    logger.error("Both NSE and OpenAlgo option chain sources failed for {}", symbol);
+    for (int attempt = 1; attempt <= 2; attempt++) {
+      logger.warn("BSE option chain unavailable for SENSEX, retrying (attempt {}/2)...", attempt);
+      try {
+        Thread.sleep(5000);
+      } catch (final InterruptedException e) {
+        Thread.currentThread().interrupt();
+        break;
+      }
+      bseData = bseClient.fetchOptionChain("SENSEX");
+      if (isValid(bseData)) {
+        return bseData;
+      }
+    }
+
+    logger.warn("BSE option chain failed after 3 attempts for SENSEX");
     return null;
   }
 
@@ -75,6 +96,9 @@ public class FallbackOptionChainClient implements OptionChainClient {
   public IndexQuote fetchIndexQuote(final String symbol) {
     if (NSE_SYMBOLS.contains(symbol)) {
       return nseClient.fetchIndexQuote(symbol);
+    }
+    if ("SENSEX".equals(symbol)) {
+      return bseClient.fetchIndexQuote("SENSEX");
     }
     return null;
   }
