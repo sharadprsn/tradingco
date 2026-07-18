@@ -324,16 +324,6 @@ public class NseOptionChainClient implements OptionChainClient {
     }
   }
 
-  public OptionChainData fetchEquityOptionChain(final String symbol) {
-    ensureSession();
-    final String expiry = resolveNearestExpiry(symbol);
-    if (expiry == null) {
-      logger.warn("Could not resolve expiry for equity option chain {}", symbol);
-      return emptyResponse();
-    }
-    return fetchEquityData(expiry, symbol);
-  }
-
   private OptionChainData fetchEquityData(final String expiry, final String symbol) {
     try {
       final String url = nseConfig.getEquityOptionChainUrl(symbol) + "&expiry=" + expiry;

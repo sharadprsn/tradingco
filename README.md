@@ -1,20 +1,50 @@
-# Kite Trading — OI-Based Intraday Monitor (Nifty & Sensex)
+# Kite Trading — Intraday Strategies (Vande Bharat & Multi-TF RSI)
 
-A Spring Boot application that monitors NSE Nifty/Sensex option chain data in real time, computes Put-Call Ratio (PCR) and Open Interest (OI) buildup, alerts a Calendar Spread recommendation via Telegram once the OI has stabilized, and monitors positions with a multi-layered exit strategy. Data is persisted to an embedded H2 database.
+A Spring Boot application that runs two intraday trading strategies on NSE data, pushing signals and alerts to Telegram.
 
-## Features
+## Strategies
 
-- **Dual Index Routing** — Mon/Tue/Fri → Nifty, Wed/Thu → Sensex (auto-detected)
-- **OI Analysis** — Fetches NSE option chain every 6 minutes, filters near ATM strikes
-- **Direction Prediction** — Bullish/Bearish/Neutral based on PE vs CE OI change dominance (60% threshold)
-- **Delta-Based Strike Selection** — Primary: Black-Scholes delta 0.15; fallback: ₹30-40 premium range
-- **Position Sizing** — Based on ₹10L capital, dynamic lot allocation based on confidence and margins
-- **Multi-Layer Exit Strategy** — Hard stop (2× net premium or 2.5× sold leg), trailing stop (0.5% pullback of underlying), profit target (80% decay), PCR shift (dynamic threshold), direction reversal (rolling window), SuperTrend (period 5), OI surge (3% of total open interest), strike breach, time square-off (3:10 PM)
-- **H2 Database Persistence** — All snapshots persisted with VIX + index OHLC, stored on host in `./data/`
-- **CSV Data Export** — REST endpoint for data download
-- **Telegram Notifications** — Calendar Spread recommendation (when stable), OI updates (threshold-gated), exit alerts
-- **Startup Health Check** — Verifies NSE connectivity and Telegram bot on startup
-- **Docker** — Multi-stage build, JRE Alpine, non-root user, health check (HTTPS support)
+### 1. Vande Bharat — F&O Stock Breakout
+Intraday breakout strategy on F&O stocks using PDH/PDL (Previous Day High/Low) levels:
+
+- **Pre-market scan** (9:10 AM) — Fetches NSE pre-open data, selects top 10 F&O stocks by % change, loads PDH/PDL from bhavcopy
+- **Breakout detection** — Price breaks above PDH (LONG) or below PDL (SHORT)
+- **Inside candle filter** — Waits for a candle within the breakout candle's range with lower volume
+- **Entry trigger** — Price breaks above inside-candle high (LONG) or below inside-candle low (SHORT) with higher volume
+- **Position sizing** — Risk-based (0.5% of ₹10L capital per trade)
+- **Exit** — Partial at 1:2 RR (50% book), trailing stop, EMA 10 crossover
+- **Schedule** — Every 5 min, 9:30 AM – 3:30 PM
+
+### 2. Multi-TF RSI Nifty Option
+Nifty index options strategy using multi-timeframe RSI divergence and candlestick patterns:
+
+- **Timeframe** — 5-min and 15-min candles built from 1-min Nifty index ticks
+- **RSI (Wilder's smoothing)** — 14-period RSI on both timeframes, compared against 20-period SMA
+- **Entry** — Both 5m and 15m RSI above SMA + bullish candlestick pattern → buy CE; both below SMA + bearish pattern → buy PE
+- **Strike selection** — ATM ± 100 range, premium ₹60–100
+- **Exit** — RSI crossover (5m RSI crosses below/above SMA), or timeframe conflict, or 11:30 AM time square-off
+- **Max 1 trade per day**
+
+### 2. Vande Bharat — F&O Stock Breakout
+Intraday breakout strategy on F&O stocks using PDH/PDL (Previous Day High/Low):
+
+- **Pre-market scan** (9:10 AM) — Fetches NSE pre-open data, selects top 10 F&O stocks by % change, loads PDH/PDL from bhavcopy
+- **Breakout detection** — Price breaks above PDH (LONG) or below PDL (SHORT)
+- **Inside candle filter** — Waits for a candle within the breakout candle's range with lower volume
+- **Entry** — Price breaks above inside-candle high (LONG) or below inside-candle low (SHORT) with higher volume
+- **Position sizing** — Risk-based (0.5% of ₹10L capital per trade)
+- **Exit** — Partial at 1:2 RR (50% book), trailing stop, EMA 10 crossover
+- **Schedule** — Every 5 min, 9:30 AM – 3:30 PM
+
+### 2. Multi-TF RSI Nifty Option
+Nifty index options strategy using multi-timeframe RSI divergence and candlestick patterns:
+
+- **Candles** — 5-min and 15-min built from 1-min Nifty index ticks
+- **RSI (Wilder's smoothing)** — 14-period RSI on both timeframes, compared against 20-period SMA
+- **Entry** — Both 5m and 15m RSI above SMA + bullish candlestick pattern → buy CE; both below SMA + bearish pattern → buy PE
+- **Strike selection** — ATM ± 100 range, premium ₹60–100
+- **Exit** — RSI crossover (5m RSI crosses SMA), timeframe conflict, or 11:30 AM time square-off
+- **Max 1 trade per day**
 
 ## Prerequisites
 
@@ -22,7 +52,6 @@ A Spring Boot application that monitors NSE Nifty/Sensex option chain data in re
 - Gradle 9.x (bundled wrapper)
 - Docker (optional, for containerised deployment)
 - Telegram bot token (from [@BotFather](https://t.me/BotFather))
-- Zerodha Kite API credentials (optional — for order placement endpoints)
 
 ## Quick Start
 
@@ -35,11 +64,8 @@ cp .env.example .env
 Edit `.env` with your credentials:
 
 ```env
-KITE_API_KEY=your-api-key
-KITE_API_SECRET=your-api-secret
 TELEGRAM_BOT_TOKEN=your-bot-token
 TELEGRAM_CHAT_ID=your-chat-id
-APP_BASE_URL=https://80.225.215.99
 ```
 
 ### 2. Run
@@ -62,46 +88,60 @@ docker compose up --build
 src/main/java/com/kite/trading/
 ├── KiteTradingApplication.java          # @EnableScheduling entry point
 ├── config/
-│   ├── NseConfig.java                   # NSE API WebClient
+│   ├── NseConfig.java                   # NSE API URL builder
 │   ├── TelegramConfig.java              # Telegram API WebClient
 │   ├── StartupHealthCheck.java          # Startup connectivity checks
 │   ├── KiteConfig.java                  # Kite API credentials
 │   ├── WebClientConfig.java             # Shared WebClient configuration
-│   └── LoggingConfig.java               # HTTP log forwarding
+│   ├── WebMvcConfig.java               # CORS configuration
+│   └── LogbackHttpAppender.java         # HTTP log forwarding
 ├── controller/
 │   ├── AuthController.java              # Kite Connect OAuth endpoints
 │   ├── OptionChainController.java       # Option chain query endpoints
-│   ├── PositionController.java          # Position query endpoints
-│   └── DataExportController.java        # CSV export + stats
+│   └── PositionController.java          # Position query endpoints
 ├── dto/
-│   ├── OiDataSnapshot.java              # OI snapshot record (PCR, totals, buildup, premiums)
-│   ├── OiAnalysisResult.java            # Prediction result + trade recommendation
 │   ├── OptionChainData.java             # NSE API response DTO
 │   ├── IndexQuote.java                  # Index OHLC quote
-├── entity/
-│   └── OiSnapshotEntity.java            # JPA entity for H2 persistence
-├── repository/
-│   └── OiSnapshotRepository.java        # Spring Data JPA repository
+│   ├── StockQuote.java                  # Equity quote DTO
+│   ├── VandeBharatSignal.java           # Vande Bharat signal DTO
+│   ├── MultiTfRSINiftySignal.java        # Multi-TF RSI signal DTO
+│   ├── OhlcCandle.java                  # OHLC candle record
+│   ├── Position.java                    # Position DTO
+│   └── ... (Kite auth, order DTOs)
 ├── scheduler/
-│   └── IntradayOiScheduler.java         # 6-min fixed rate + cron reset/summary
+│   ├── VandeBharatStrategyScheduler.java  # 5-min fixed rate + cron reset/scan
+│   └── MultiTfRSINiftyScheduler.java      # 1-min fixed rate + cron reset
 ├── exception/
-│   └── GlobalExceptionHandler.java      # REST error handling
+│   ├── GlobalExceptionHandler.java      # REST error handling
+│   ├── KiteApiException.java            # Kite API errors
+│   └── KiteAuthenticationException.java # Auth errors
 └── service/
-    ├── OiAnalysisService.java           # Core OI analysis engine + H2 persist
-    ├── NseOptionChainClient.java        # NSE API client (primary)
-    ├── BseOptionChainClient.java            # BSE option chain client
-    ├── FallbackOptionChainClient.java    # @Primary orchestrator with retry
-    ├── TelegramService.java             # Telegram messaging
-    └── ZerodhaApiClient.java            # Kite trade API (order/quote)
+    ├── NseOptionChainClient.java        # NSE API client (option chain, quotes, pre-open, bhavcopy)
+    ├── BseOptionChainClient.java         # BSE option chain client
+    ├── VandeBharatStrategyService.java   # Vande Bharat breakout strategy
+    ├── MultiTfRSINiftyOptionService.java # Multi-TF RSI Nifty option strategy
+    ├── CandlestickPatternService.java    # Candlestick pattern detection
+    ├── TelegramServiceImpl.java          # Telegram messaging
+    ├── TelegramService.java              # Telegram interface
+    ├── KiteAuthService.java              # Kite Connect OAuth
+    ├── ZerodhaApiClientImpl.java         # Kite trade API
+    └── ZerodhaPositionService.java       # Position management
 ```
 
 ```
-NSE API ──► NseOptionChainClient ──► OiAnalysisService ──► TelegramService
-         (every 6 min)                  │                        │
-                                        ├─ in-memory snapshots    ├─ Calendar Spread Alert
-                                        ├─ H2 persistence         ├─ OI updates
-                                        ├─ direction prediction   ├─ exit alerts
-                                        └─ exit signal check
+NSE API ──► NseOptionChainClient ──► VandeBharatStrategyService ──► TelegramService
+         (every 5 min)                  │
+                                         ├─ PDH/PDL breakout detection
+                                         ├─ Inside candle filter
+                                         ├─ Entry signal generation
+                                         └─ Trailing stop / EMA 10 exit
+
+NSE API ──► NseOptionChainClient ──► MultiTfRSINiftyOptionService ──► TelegramService
+         (every 1 min)                   │
+                                         ├─ 5m/15m RSI (Wilder's) vs SMA
+                                         ├─ Candlestick pattern detection
+                                         ├─ Entry signal (CE/PE)
+                                         └─ RSI crossover exit
 ```
 
 ## Telegram Messages
@@ -109,28 +149,24 @@ NSE API ──► NseOptionChainClient ──► OiAnalysisService ──► Tel
 | Trigger | Content |
 |---------|---------|
 | **Startup** | Application initialized — NSE & Telegram OK |
-| **Calendar Spread Alert** | Direction, confidence %, PCR, VIX, day range, largest PE/CE OI, open, Calendar Spread strikes, trade recommendation, and stability logs |
-| **OI Update** (6 min) | Current PCR, PE/CE OI + change, top buildup strikes (skipped if change < thresholds) |
-| **Exit Signal** | Reason (HARD STOP / PROFIT TARGET / PCR SHIFT / DIRECTION REVERSAL / SUPERTREND / STRIKE BREACH / TIME SQOFF), confidence, exit fraction |
-| **Early Warning** | Pre-confirmation alert when OI-based signal first detected |
-| **Market Close** (4 PM) | Summary: 9:15 AM vs 3:30 PM index levels + movement |
-
-### Thresholds (noise reduction)
-
-- PCR must change by ≥ 0.05
-- PE or CE OI must change by ≥ 5%
-- Both must be exceeded for a periodic OI update notification
+| **Vande Bharat Pre-Market** | Top 10 F&O stocks by %CHNG, PDH/PDL, advances/declines |
+| **Vande Bharat Signal** | Stock, direction, entry, SL, PDH/PDL, suggested qty |
+| **Vande Bharat Partial Exit** | Stock, target hit, 50% booked at 1:2 RR |
+| **Vande Bharat Exit** | Stock, exit price, reason (TRAILING STOP / EMA 10) |
+| **Multi-TF RSI Signal** | Direction, option type, strike, premium, spot, patterns, RSI alignment |
+| **Multi-TF RSI Exit** | Direction, exit premium, reason (RSI CROSS / CONFLICT) |
+| **Error** | Scheduler error message |
 
 ## Scheduler Schedule
 
 | Time (IST) | Action |
 |------------|--------|
-| 9:00 AM | Reset daily state — clear in-memory snapshots, flags |
-| 9:15 AM – 3:30 PM | Polls every 6 minutes: fetches option chain, records snapshots, checks stability to notify Calendar Spread alert, and checks exit signals if position is active |
-| 3:10 PM | Time-based square-off guard (inside exit assessment) |
-| 4:00 PM | Market close summary + daily reset |
-| Weekends | `shouldRun()` returns `false`, no activity |
-
+| 8:00 AM | Multi-TF RSI daily reset |
+| 9:00 AM | Vande Bharat daily reset |
+| 9:10 AM | Vande Bharat pre-market scan (top 10 F&O stocks) |
+| 9:15 AM – 3:30 PM | Vande Bharat analysis every 5 min |
+| 9:30 AM – 11:30 AM | Multi-TF RSI Nifty evaluation every 1 min |
+| Weekends | No activity |
 
 ## API Endpoints
 
@@ -141,9 +177,6 @@ NSE API ──► NseOptionChainClient ──► OiAnalysisService ──► Tel
 | POST | `/api/v1/auth/session` | Exchange `request_token` for session |
 | GET | `/api/v1/positions` | All active positions |
 | GET | `/api/v1/positions/nifty/intraday` | NIFTY intraday positions |
-| GET | `/api/v1/data/export/csv` | Download all snapshots as CSV |
-| GET | `/api/v1/data/stats` | Snapshot counts (total + last 7 days) |
-| GET | `/h2-console` | H2 database console (dev access) |
 | GET | `/actuator/health` | Health check |
 
 ## Configuration
@@ -152,15 +185,14 @@ NSE API ──► NseOptionChainClient ──► OiAnalysisService ──► Tel
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `KITE_API_KEY` | Yes | — | Zerodha API key |
-| `KITE_API_SECRET` | Yes | — | Zerodha API secret |
 | `TELEGRAM_BOT_TOKEN` | Yes | — | Telegram bot token (from @BotFather) |
 | `TELEGRAM_CHAT_ID` | Yes | — | Target chat/group ID |
-| `NSE_OPTION_CHAIN_URL` | No | `https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY` | NSE API URL |
-| `NSE_HOME_URL` | No | `https://www.nseindia.com` | NSE homepage (for cookie) |
+| `KITE_API_KEY` | No | — | Zerodha API key |
+| `KITE_API_SECRET` | No | — | Zerodha API secret |
+| `NSE_HOME_URL` | No | `https://www.nseindia.com/option-chain` | NSE homepage (for cookie) |
 | `KITE_BASE_URL` | No | `https://api.kite.trade` | Kite REST API base |
 | `KITE_LOGIN_URL` | No | `https://kite.zerodha.com/connect/login` | Kite Connect login |
-| `APP_BASE_URL` | No | `https://localhost:443` | Server base URL (Telegram login link) |
+| `APP_BASE_URL` | No | `https://localhost:443` | Server base URL |
 | `KITE_REDIRECT_URL` | No | `https://localhost:443/api/v1/auth/callback` | OAuth redirect |
 | `SERVER_SSL_KEY_STORE` | No | `keystore.p12` | SSL keystore path |
 | `SERVER_SSL_KEY_STORE_PASSWORD` | No | `changeme` | SSL keystore password |
@@ -203,8 +235,9 @@ docker run -d --name kite-trading -p 443:443 --env-file .env sharadprsn/kite-tra
 
 | Test file | Tests | Covers |
 |-----------|-------|--------|
-| `OiAnalysisServiceTest` | 35 | PCR, ATM filter, direction prediction, thresholds, position lifecycle, reset, day-of-week routing, strikes, exit signals, delta calculation, stability gate logic |
-| `IntradayOiSchedulerTest` | 5 | shouldRun guard, reset, close summary, error handling |
+| `VandeBharatStrategyServiceTest` | — | Vande Bharat breakout, inside candle, entry/exit signals |
+| `MultiTfRSINiftyOptionServiceTest` | — | RSI computation, entry/exit logic, strike selection |
+| `CandlestickPatternServiceTest` | — | Pattern detection (hammer, engulfing, marubozu, doji) |
 | `StartupHealthCheckTest` | 4 | NSE/Telegram success and failure paths |
 | `NseConnectivityTest` | 3 | NSE config URLs, option chain data validation |
 | `BseConnectivityTest` | 1 | BSE configuration and SENSEX option chain fetch validation |
@@ -218,38 +251,28 @@ docker run -d --name kite-trading -p 443:443 --env-file .env sharadprsn/kite-tra
 - Structured logging via SLF4J
 - No `var` keyword, no heavy dependencies without explicit need
 
-
-## oiAnalysisService Constants
+## Vande Bharat Constants
 
 | Constant | Value | Purpose |
 |----------|-------|---------|
-| `PCR_BULLISH_THRESHOLD` | 1.2 | PCR above this is bullish |
-| `PCR_BEARISH_THRESHOLD` | 0.8 | PCR below this is bearish |
-| `STRIKE_INTERVAL_NIFTY` | 50 | Nifty strike spacing |
-| `STRIKE_INTERVAL_SENSEX` | 100 | Sensex strike spacing |
-| `LOT_SIZE_NIFTY` | 65 | Nifty lot size (incl. buffer) |
-| `LOT_SIZE_SENSEX` | 20 | Sensex lot size (incl. buffer) |
-| `DEPLOYED_CAPITAL` | ₹10,00,000 | Position sizing base |
-| `EXIT_PCR_SHIFT` | 0.3 | Floor PCR shift threshold |
-| `EXIT_OI_SURGE_PCT` | 0.03 (3%) | OI surge exit trigger fraction of total OI |
-| `PCR_VOLATILITY_WINDOW` | 8 | Snapshot window for dynamic PCR threshold |
-| `PCR_VOLATILITY_MULTIPLIER` | 2.0 | Multiplier for dynamic PCR threshold |
-| `DIRECTION_ROLLING_WINDOW` | 3 | Snapshots for rolling direction |
-| `CONFIRMATION_CONSECUTIVE` | 2 | Required confirmations for OI-based exits |
-| `EXIT_COOLDOWN_MINUTES` | 15 | Cooldown after OI-based exit |
-| `HARD_STOP_LOSS_PCT` | 1.0 | Hard stop % (triggers when net premium doubles or sold leg premium reaches 2.5×) |
-| `TRAILING_STOP_PCT` | 0.5 | Trailing stop pullback % from best price |
-| `AFTERNOON_THRESHOLD_MULTIPLIER` | 0.5 | PCR thresholds halved after 2:30 PM |
-| `MIN_PCR_CHANGE_FOR_NOTIFICATION` | 0.05 | Min PCR change to send Telegram update |
-| `MIN_OI_CHANGE_FRACTION` | 0.05 | Min OI change fraction (5%) |
-| `NEAR_STRIKE_RANGE` | 5 | ATM ± 5 strikes for OI aggregation |
-| `TOP_STRIKES_COUNT` | 5 | Top OI buildup strikes to track |
-| `MARGIN_PER_LOT` | ₹60,000 | Margin required per lot |
-| `SUPERTREND_PERIOD` | 5 | ATR period (30 min) |
-| `SUPERTREND_MULTIPLIER` | 3.0 | ATR multiplier |
-| `OI_STABILITY_SNAPSHOTS` | 3 | Min consecutive reads before stability confirmed |
-| `PCR_STABILITY_MAX_VAR` | 0.05 | Max PCR swing across stability window |
-| `OI_SLOWDOWN_RATIO` | 0.50 | Latest OI change must be < 50% of first snapshot |
-| `OI_VELOCITY_MAX_PCT` | 30.0% | Max percent change in OI at any single strike |
-| `HIGH_CONFIDENCE_THRESHOLD` | 80% | Min confidence for Calendar Spread alert |
-| `CALENDAR_ALERT_COOLDOWN_MIN` | 30 | Cooldown (minutes) between Calendar Spread alerts |
+| `EMA_PERIOD` | 10 | EMA period for trailing exit |
+| `MAX_CANDLES` | 20 | Max 5-min candles kept in memory |
+| `MAX_ACTIVE_STOCKS` | 10 | Max stocks tracked simultaneously |
+| `CAPITAL` | ₹10,00,000 | Position sizing base |
+| `RISK_PER_TRADE_PCT` | 0.5% | Risk per trade |
+| `INSIDE_CANDLE_LIMIT` | 6 | Max candles to wait for inside candle |
+| `MAX_CONCURRENT_TRADES` | 2 | Max simultaneous trades |
+| `PARTIAL_EXIT_MULTIPLIER` | 2 | 1:2 RR for partial exit |
+| `PARTIAL_EXIT_PCT` | 50% | Fraction to book at partial exit |
+
+## Multi-TF RSI Constants
+
+| Constant | Value | Purpose |
+|----------|-------|---------|
+| `RSI_PERIOD` | 14 | RSI computation period (Wilder's smoothing) |
+| `SMA_PERIOD` | 20 | SMA period for RSI signal line |
+| `MIN_PREMIUM` | ₹60 | Minimum option premium for strike selection |
+| `MAX_PREMIUM` | ₹100 | Maximum option premium for strike selection |
+| `MAX_TRADES_PER_DAY` | 1 | Max trades per day |
+| `FIVE_MIN_CANDLES` | 5 | 1-min ticks per 5-min candle |
+| `FIFTEEN_MIN_CANDLES` | 3 | 5-min candles per 15-min candle |

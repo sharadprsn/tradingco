@@ -187,54 +187,6 @@ public class VandeBharatStrategyService {
         niftyResp != null ? niftyResp.unchanged() : -1);
   }
 
-  public void sendPreOpenSummary() {
-    final DayOfWeek day = LocalDate.now(clock).getDayOfWeek();
-    if (day == DayOfWeek.SATURDAY || day == DayOfWeek.SUNDAY) {
-      return;
-    }
-
-    final NseOptionChainClient.PreOpenResponse resp = nseClient.fetchPreOpenData("FO");
-    if (resp == null || resp.data() == null || resp.data().isEmpty()) {
-      logger.warn("Pre-open data not available, skipping summary");
-      return;
-    }
-
-    final List<NseOptionChainClient.PreOpenItem> sorted =
-        resp.data().stream()
-            .sorted(
-                Comparator.comparing(
-                    (final NseOptionChainClient.PreOpenItem item) ->
-                        item.metadata().totalTurnover(),
-                    Comparator.nullsLast(Comparator.reverseOrder())))
-            .toList();
-
-    final StringBuilder sb = new StringBuilder();
-    sb.append("\uD83D\uDD05 PRE-OPEN MARKET SUMMARY (F&O)\n\n");
-    sb.append("Advances: ").append(resp.advances());
-    sb.append("  |  Declines: ").append(resp.declines());
-    sb.append("  |  Unchanged: ").append(resp.unchanged());
-    sb.append("\n\nTop 5 by Turnover:\n");
-
-    int rank = 1;
-    for (final NseOptionChainClient.PreOpenItem item : sorted) {
-      if (rank > 5) break;
-      final NseOptionChainClient.PreOpenMetadata m = item.metadata();
-      sb.append(rank++)
-          .append(". ")
-          .append(m.symbol())
-          .append("  \u20B9")
-          .append(formatTurnover(m.totalTurnover()))
-          .append("  Vol: ")
-          .append(formatVolume(m.finalQuantity()))
-          .append("  IEP: \u20B9")
-          .append(m.iep() != null ? m.iep().setScale(0, RoundingMode.HALF_UP) : "N/A")
-          .append("\n");
-    }
-
-    logger.info("Sending pre-open market summary");
-    telegramService.sendMessage(sb.toString());
-  }
-
   private void notifyPreOpenResults(
       final List<NseOptionChainClient.PreOpenItem> items,
       final int foAdvances,
@@ -310,11 +262,6 @@ public class VandeBharatStrategyService {
     } catch (final Exception e) {
       logger.warn("Failed to load bhavcopy: {}, PDH/PDL will use fallback", e.getMessage());
     }
-  }
-
-  private static String formatOi(final BigDecimal value) {
-    if (value == null) return "0";
-    return value.setScale(0, RoundingMode.HALF_UP).toString();
   }
 
   private static String formatTurnover(final BigDecimal value) {
@@ -426,13 +373,29 @@ public class VandeBharatStrategyService {
       state.lastPrice = currentPrice;
       state.lastVolume = currentVolume;
       state.lastSlot = now;
+      state.prevDayHigh = info.high();
+      state.prevDayLow = info.low();
       return null;
     }
 
     final BigDecimal open = state.lastPrice;
     final BigDecimal close = currentPrice;
-    final BigDecimal high = open.compareTo(close) > 0 ? open : close;
-    final BigDecimal low = open.compareTo(close) < 0 ? open : close;
+    final BigDecimal high;
+    final BigDecimal low;
+    if (info.high() != null
+        && state.prevDayHigh != null
+        && info.high().compareTo(state.prevDayHigh) > 0) {
+      high = info.high();
+    } else {
+      high = open.compareTo(close) > 0 ? open : close;
+    }
+    if (info.low() != null
+        && state.prevDayLow != null
+        && info.low().compareTo(state.prevDayLow) < 0) {
+      low = info.low();
+    } else {
+      low = open.compareTo(close) < 0 ? open : close;
+    }
     final BigDecimal volume = currentVolume.subtract(state.lastVolume);
     final BigDecimal candleVolume =
         volume.compareTo(BigDecimal.ZERO) > 0 ? volume : BigDecimal.ZERO;
@@ -442,6 +405,8 @@ public class VandeBharatStrategyService {
     state.lastPrice = currentPrice;
     state.lastVolume = currentVolume;
     state.lastSlot = now;
+    state.prevDayHigh = info.high();
+    state.prevDayLow = info.low();
 
     return new FiveMinCandle(candleTime, open, high, low, close, candleVolume);
   }
@@ -545,6 +510,7 @@ public class VandeBharatStrategyService {
                 && close.compareTo(state.firstCandleLow) < 0);
     if (entryTriggered && candle.volume.compareTo(state.insideCandle.volume) > 0) {
       generateSignal(state, state.insideCandle);
+      enterTrade(state.symbol);
     }
   }
 
@@ -839,6 +805,8 @@ public class VandeBharatStrategyService {
     BigDecimal lastPrice;
     BigDecimal lastVolume = BigDecimal.ZERO;
     LocalTime lastSlot;
+    BigDecimal prevDayHigh;
+    BigDecimal prevDayLow;
 
     FiveMinCandle breakoutCandle;
     String breakoutDirection;

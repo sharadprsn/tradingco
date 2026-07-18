@@ -67,7 +67,7 @@ class VandeBharatStrategyServiceTest {
   @Test
   void analyze_shouldInitializeOnFirstCallAndNotSendSignal() {
     mockQuoteFor(
-        "RELIANCE",
+        "TATASTEEL",
         BigDecimal.valueOf(100),
         BigDecimal.valueOf(105),
         BigDecimal.valueOf(98),
@@ -108,7 +108,7 @@ class VandeBharatStrategyServiceTest {
   @Test
   void resetDaily_shouldClearState() {
     mockQuoteFor(
-        "RELIANCE",
+        "TATASTEEL",
         BigDecimal.valueOf(100),
         BigDecimal.valueOf(105),
         BigDecimal.valueOf(98),
@@ -134,7 +134,7 @@ class VandeBharatStrategyServiceTest {
 
     // Tick 1 (9:35): init
     mockQuoteFor(
-        "RELIANCE",
+        "TATASTEEL",
         BigDecimal.valueOf(100),
         BigDecimal.valueOf(105),
         BigDecimal.valueOf(98),
@@ -146,7 +146,7 @@ class VandeBharatStrategyServiceTest {
 
     // Tick 2 (9:40): breakout candle, vol=10000
     mockQuoteFor(
-        "RELIANCE",
+        "TATASTEEL",
         BigDecimal.valueOf(100),
         BigDecimal.valueOf(105),
         BigDecimal.valueOf(98),
@@ -158,7 +158,7 @@ class VandeBharatStrategyServiceTest {
 
     // Tick 3 (9:45): inside candle, vol=3000 (<= breakout vol 10000 ✓)
     mockQuoteFor(
-        "RELIANCE",
+        "TATASTEEL",
         BigDecimal.valueOf(100),
         BigDecimal.valueOf(105),
         BigDecimal.valueOf(98),
@@ -174,7 +174,7 @@ class VandeBharatStrategyServiceTest {
     // Tick 4 (9:50): entry trigger, vol=5000 (> inside vol 3000 ✓), close=104 >
     // insideCandle.high=103
     mockQuoteFor(
-        "RELIANCE",
+        "TATASTEEL",
         BigDecimal.valueOf(100),
         BigDecimal.valueOf(105),
         BigDecimal.valueOf(98),
@@ -187,7 +187,7 @@ class VandeBharatStrategyServiceTest {
     final var signals = service.getSignals();
     assertEquals(1, signals.size());
     final var signal = signals.get(0);
-    assertEquals("RELIANCE", signal.symbol());
+    assertEquals("TATASTEEL", signal.symbol());
     assertEquals("LONG", signal.direction());
     assertEquals(0, BigDecimal.valueOf(103).compareTo(signal.entryPrice()));
     assertEquals(0, BigDecimal.valueOf(102).compareTo(signal.stopLoss()));
@@ -310,7 +310,7 @@ class VandeBharatStrategyServiceTest {
     // ---- Entry phase ----
     // Tick 1 (9:35): init
     mockQuoteFor(
-        "RELIANCE",
+        "TATASTEEL",
         BigDecimal.valueOf(100),
         BigDecimal.valueOf(105),
         BigDecimal.valueOf(98),
@@ -322,7 +322,7 @@ class VandeBharatStrategyServiceTest {
 
     // Tick 2 (9:40): breakout
     mockQuoteFor(
-        "RELIANCE",
+        "TATASTEEL",
         BigDecimal.valueOf(100),
         BigDecimal.valueOf(105),
         BigDecimal.valueOf(98),
@@ -334,7 +334,7 @@ class VandeBharatStrategyServiceTest {
 
     // Tick 3 (9:45): inside candle
     mockQuoteFor(
-        "RELIANCE",
+        "TATASTEEL",
         BigDecimal.valueOf(100),
         BigDecimal.valueOf(105),
         BigDecimal.valueOf(98),
@@ -348,7 +348,7 @@ class VandeBharatStrategyServiceTest {
 
     // Tick 4 (9:50): entry trigger, vol=5000 > inside vol 3000 ✓
     mockQuoteFor(
-        "RELIANCE",
+        "TATASTEEL",
         BigDecimal.valueOf(100),
         BigDecimal.valueOf(105),
         BigDecimal.valueOf(98),
@@ -359,17 +359,17 @@ class VandeBharatStrategyServiceTest {
     service.analyze();
 
     assertEquals(1, service.getSignals().size());
-    service.enterTrade("RELIANCE");
+    service.enterTrade("TATASTEEL");
 
     // ---- Accumulate 7 more candles (total 10) for SMA ----
     // Current candles: [close=103, close=102, close=104] = 3
     // Need 7 more: 9:55 through 10:25
     long vol = 63000;
-    for (int min = 55; min <= 25; min = (min + 5) % 60) {
-      final int hour = min < 55 ? 10 : 9;
-      final String time = String.format("%02d:%02d", hour, min);
+    for (int count = 0; count < 7; count++) {
+      final int totalMin = 9 * 60 + 55 + count * 5;
+      final String time = String.format("%02d:%02d", totalMin / 60, totalMin % 60);
       mockQuoteFor(
-          "RELIANCE",
+          "TATASTEEL",
           BigDecimal.valueOf(100),
           BigDecimal.valueOf(105),
           BigDecimal.valueOf(98),
@@ -379,7 +379,6 @@ class VandeBharatStrategyServiceTest {
       clock.setTime(time);
       service.analyze();
       vol += 5000;
-      if (min >= 25) break;
     }
 
     // After tick at 10:25, 10th candle added → SMA = (103+102+104+103*7)/10 = 103.0
@@ -388,7 +387,7 @@ class VandeBharatStrategyServiceTest {
 
     // ---- Tick at 10:30: close=102 triggers trailing stop (102 < 103) ----
     mockQuoteFor(
-        "RELIANCE",
+        "TATASTEEL",
         BigDecimal.valueOf(100),
         BigDecimal.valueOf(105),
         BigDecimal.valueOf(98),

@@ -20,7 +20,6 @@ public class KiteConfig {
   private String apiSecret;
   private String baseUrl;
   private String loginUrl;
-  private String redirectUrl;
 
   public KiteConfig() {}
 
@@ -54,13 +53,5 @@ public class KiteConfig {
 
   public void setLoginUrl(final String loginUrl) {
     this.loginUrl = loginUrl;
-  }
-
-  public String getRedirectUrl() {
-    return redirectUrl;
-  }
-
-  public void setRedirectUrl(final String redirectUrl) {
-    this.redirectUrl = redirectUrl;
   }
 }
