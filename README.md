@@ -1,6 +1,6 @@
 # Kite Trading — OI-Based Intraday Monitor (Nifty & Sensex)
 
-A Spring Boot application that monitors NSE Nifty/Sensex option chain data in real time, computes Put-Call Ratio (PCR) and Open Interest (OI) buildup, alerts a Calendar Spread recommendation via Telegram once the OI has stabilized, and monitors positions with a multi-layered exit strategy. Data is persisted to an embedded H2 database and used by an in-process RandomForest ML model for direction prediction.
+A Spring Boot application that monitors NSE Nifty/Sensex option chain data in real time, computes Put-Call Ratio (PCR) and Open Interest (OI) buildup, alerts a Calendar Spread recommendation via Telegram once the OI has stabilized, and monitors positions with a multi-layered exit strategy. Data is persisted to an embedded H2 database.
 
 ## Features
 
@@ -11,9 +11,8 @@ A Spring Boot application that monitors NSE Nifty/Sensex option chain data in re
 - **Position Sizing** — Based on ₹10L capital, dynamic lot allocation based on confidence and margins
 - **Multi-Layer Exit Strategy** — Hard stop (2× net premium or 2.5× sold leg), trailing stop (0.5% pullback of underlying), profit target (80% decay), PCR shift (dynamic threshold), direction reversal (rolling window), SuperTrend (period 5), OI surge (3% of total open interest), strike breach, time square-off (3:10 PM)
 - **H2 Database Persistence** — All snapshots persisted with VIX + index OHLC, stored on host in `./data/`
-- **CSV Data Export** — REST endpoint for ML training data download
-- **In-Process ML Model** — RandomForest (200 trees) trained daily at 4 PM from persisted snapshot data; predicts direction + confidence
-- **Telegram Notifications** — Calendar Spread recommendation (when stable), OI updates (threshold-gated), exit alerts, training results
+- **CSV Data Export** — REST endpoint for data download
+- **Telegram Notifications** — Calendar Spread recommendation (when stable), OI updates (threshold-gated), exit alerts
 - **Startup Health Check** — Verifies NSE connectivity and Telegram bot on startup
 - **Docker** — Multi-stage build, JRE Alpine, non-root user, health check (HTTPS support)
 
@@ -84,21 +83,15 @@ src/main/java/com/kite/trading/
 ├── repository/
 │   └── OiSnapshotRepository.java        # Spring Data JPA repository
 ├── scheduler/
-│   └── IntradayOiScheduler.java         # 6-min fixed rate + cron reset/summary/train
+│   └── IntradayOiScheduler.java         # 6-min fixed rate + cron reset/summary
 ├── exception/
 │   └── GlobalExceptionHandler.java      # REST error handling
 └── service/
-    ├── OiAnalysisService.java           # Core OI analysis engine + H2 persist + ML integration
+    ├── OiAnalysisService.java           # Core OI analysis engine + H2 persist
     ├── NseOptionChainClient.java        # NSE API client (primary)
     ├── BseOptionChainClient.java            # BSE option chain client
     ├── FallbackOptionChainClient.java    # @Primary orchestrator with retry
     ├── TelegramService.java             # Telegram messaging
-    ├── ml/
-    │   ├── DecisionTree.java            # CART classifier (from scratch)
-    │   ├── RandomForest.java            # 200-tree ensemble (from scratch)
-    │   ├── FeatureEngineering.java      # 16 technical features
-    │   ├── SentimentAnalyzer.java       # Keyword-based RSS sentiment
-    │   └── MlService.java              # @Service facade for train/predict/sentiment
     └── ZerodhaApiClient.java            # Kite trade API (order/quote)
 ```
 
@@ -108,13 +101,7 @@ NSE API ──► NseOptionChainClient ──► OiAnalysisService ──► Tel
                                         ├─ in-memory snapshots    ├─ Calendar Spread Alert
                                         ├─ H2 persistence         ├─ OI updates
                                         ├─ direction prediction   ├─ exit alerts
-                                        ├─ exit signal check      └─ training results
-                                        └─ MlService.inject()
-                                              │
-                                              ▼
-                                        RandomForest (in-process)
-                                        200 trees, 16 features
-                                        predict() + train()
+                                        └─ exit signal check
 ```
 
 ## Telegram Messages
@@ -122,12 +109,11 @@ NSE API ──► NseOptionChainClient ──► OiAnalysisService ──► Tel
 | Trigger | Content |
 |---------|---------|
 | **Startup** | Application initialized — NSE & Telegram OK |
-| **Calendar Spread Alert** | Direction, confidence %, PCR, VIX, day range, largest PE/CE OI, open, suggested strategy, Calendar Spread strikes, trade recommendation, and stability logs |
+| **Calendar Spread Alert** | Direction, confidence %, PCR, VIX, day range, largest PE/CE OI, open, Calendar Spread strikes, trade recommendation, and stability logs |
 | **OI Update** (6 min) | Current PCR, PE/CE OI + change, top buildup strikes (skipped if change < thresholds) |
 | **Exit Signal** | Reason (HARD STOP / PROFIT TARGET / PCR SHIFT / DIRECTION REVERSAL / SUPERTREND / STRIKE BREACH / TIME SQOFF), confidence, exit fraction |
 | **Early Warning** | Pre-confirmation alert when OI-based signal first detected |
 | **Market Close** (4 PM) | Summary: 9:15 AM vs 3:30 PM index levels + movement |
-| **ML Training** (4 PM) | Model retrained: OOB score, samples, accuracy metrics |
 
 ### Thresholds (noise reduction)
 
@@ -142,7 +128,7 @@ NSE API ──► NseOptionChainClient ──► OiAnalysisService ──► Tel
 | 9:00 AM | Reset daily state — clear in-memory snapshots, flags |
 | 9:15 AM – 3:30 PM | Polls every 6 minutes: fetches option chain, records snapshots, checks stability to notify Calendar Spread alert, and checks exit signals if position is active |
 | 3:10 PM | Time-based square-off guard (inside exit assessment) |
-| 4:00 PM | Market close summary + ML training trigger + daily reset |
+| 4:00 PM | Market close summary + daily reset |
 | Weekends | `shouldRun()` returns `false`, no activity |
 
 
@@ -155,7 +141,7 @@ NSE API ──► NseOptionChainClient ──► OiAnalysisService ──► Tel
 | POST | `/api/v1/auth/session` | Exchange `request_token` for session |
 | GET | `/api/v1/positions` | All active positions |
 | GET | `/api/v1/positions/nifty/intraday` | NIFTY intraday positions |
-| GET | `/api/v1/data/export/csv` | Download all snapshots as CSV (for ML training) |
+| GET | `/api/v1/data/export/csv` | Download all snapshots as CSV |
 | GET | `/api/v1/data/stats` | Snapshot counts (total + last 7 days) |
 | GET | `/h2-console` | H2 database console (dev access) |
 | GET | `/actuator/health` | Health check |
@@ -170,8 +156,6 @@ NSE API ──► NseOptionChainClient ──► OiAnalysisService ──► Tel
 | `KITE_API_SECRET` | Yes | — | Zerodha API secret |
 | `TELEGRAM_BOT_TOKEN` | Yes | — | Telegram bot token (from @BotFather) |
 | `TELEGRAM_CHAT_ID` | Yes | — | Target chat/group ID |
-| `ML_ENABLED` | No | `true` | Enable in-process ML model (RandomForest + sentiment) |
-| `ML_MODEL_PATH` | No | `./data/model.rf` | RandomForest model file path |
 | `NSE_OPTION_CHAIN_URL` | No | `https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY` | NSE API URL |
 | `NSE_HOME_URL` | No | `https://www.nseindia.com` | NSE homepage (for cookie) |
 | `KITE_BASE_URL` | No | `https://api.kite.trade` | Kite REST API base |
@@ -215,7 +199,7 @@ docker run -d --name kite-trading -p 443:443 --env-file .env sharadprsn/kite-tra
 
 > **Note**: Replace `your-registry` with your actual Docker registry (e.g., `docker.io/username`, `ghcr.io/username`, or a private registry). Login first with `docker login` if required.
 
-### Tests (36 tests)
+### Tests
 
 | Test file | Tests | Covers |
 |-----------|-------|--------|
@@ -233,7 +217,6 @@ docker run -d --name kite-trading -p 443:443 --env-file .env sharadprsn/kite-tra
 - JUnit 5 + Mockito for tests (≥80% coverage target)
 - Structured logging via SLF4J
 - No `var` keyword, no heavy dependencies without explicit need
-
 
 
 ## oiAnalysisService Constants

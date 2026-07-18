@@ -14,7 +14,6 @@ services:
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
       - TELEGRAM_BASE_URL=${TELEGRAM_BASE_URL:-https://api.telegram.org}
       - APP_BASE_URL=${APP_BASE_URL:-https://92.4.88.249:443}
-      - ML_ENABLED=${ML_ENABLED:-true}
       - LOG_HTTP_URL=${LOG_HTTP_URL}
       - LOG_HTTP_LEVEL=${LOG_HTTP_LEVEL:-WARN}
     volumes:

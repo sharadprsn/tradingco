@@ -7,10 +7,15 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kite.trading.config.NseConfig;
 import com.kite.trading.dto.IndexQuote;
 import com.kite.trading.dto.OptionChainData;
+import com.kite.trading.dto.StockQuote;
 import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -51,7 +56,7 @@ public class NseOptionChainClient implements OptionChainClient {
     return fetchData(expiry, symbol);
   }
 
-  private void ensureSession() {
+  private synchronized void ensureSession() {
     if (sessionCookie == null) {
       logger.info("Establishing NSE session via {}", nseConfig.getHomeUrl());
       final boolean success =
@@ -291,6 +296,177 @@ public class NseOptionChainClient implements OptionChainClient {
 
   public IndexQuote fetchIndexQuote() {
     return fetchIndexQuote("NIFTY");
+  }
+
+  public StockQuote fetchEquityQuote(final String symbol) {
+    ensureSession();
+    try {
+      final String url = nseConfig.getEquityQuoteUrl(symbol);
+      logger.debug("Fetching NSE equity quote for {} from {}", symbol, url);
+      return webClient
+          .get()
+          .uri(url)
+          .header("User-Agent", nseConfig.getUserAgent())
+          .header("Accept", MediaType.APPLICATION_JSON_VALUE)
+          .header("Accept-Language", "en-US,en;q=0.9")
+          .header("Referer", nseConfig.getHomeUrl())
+          .header("Cookie", sessionCookie != null ? sessionCookie : "")
+          .retrieve()
+          .bodyToMono(StockQuote.class)
+          .block();
+    } catch (final Exception e) {
+      logger.error(
+          "Failed to fetch NSE equity quote for {}: {} {}",
+          symbol,
+          e.getClass().getSimpleName(),
+          e.getMessage());
+      return null;
+    }
+  }
+
+  public OptionChainData fetchEquityOptionChain(final String symbol) {
+    ensureSession();
+    final String expiry = resolveNearestExpiry(symbol);
+    if (expiry == null) {
+      logger.warn("Could not resolve expiry for equity option chain {}", symbol);
+      return emptyResponse();
+    }
+    return fetchEquityData(expiry, symbol);
+  }
+
+  private OptionChainData fetchEquityData(final String expiry, final String symbol) {
+    try {
+      final String url = nseConfig.getEquityOptionChainUrl(symbol) + "&expiry=" + expiry;
+      logger.debug("Fetching NSE equity option chain for {} expiry {}", symbol, expiry);
+      final V3FullResponse v3 =
+          webClient
+              .get()
+              .uri(url)
+              .header("User-Agent", nseConfig.getUserAgent())
+              .header("Accept", MediaType.APPLICATION_JSON_VALUE)
+              .header("Accept-Language", "en-US,en;q=0.9")
+              .header("Referer", nseConfig.getHomeUrl())
+              .header("Cookie", sessionCookie != null ? sessionCookie : "")
+              .retrieve()
+              .bodyToMono(V3FullResponse.class)
+              .block();
+      return convert(v3);
+    } catch (final Exception e) {
+      logger.error(
+          "Failed to fetch equity option chain for {}: {} {}",
+          symbol,
+          e.getClass().getSimpleName(),
+          e.getMessage());
+      sessionCookie = null;
+      return emptyResponse();
+    }
+  }
+
+  public Map<String, BhavCopyEntry> fetchBhavCopyData(final LocalDate date) {
+    ensureSession();
+    final String dateStr = date.format(DateTimeFormatter.ofPattern("ddMMyyyy"));
+    final String url = nseConfig.getBhavCopyUrl(dateStr);
+    logger.debug("Fetching NSE bhavcopy for {} from {}", date, url);
+    try {
+      final String csv =
+          webClient
+              .get()
+              .uri(url)
+              .header("User-Agent", nseConfig.getUserAgent())
+              .header("Accept", "text/csv, */*")
+              .header("Accept-Language", "en-US,en;q=0.9")
+              .header("Referer", nseConfig.getHomeUrl())
+              .header("Cookie", sessionCookie != null ? sessionCookie : "")
+              .retrieve()
+              .bodyToMono(String.class)
+              .block();
+      if (csv == null || csv.isBlank()) {
+        logger.warn("Bhavcopy response empty for {}", dateStr);
+        return Map.of();
+      }
+      return parseBhavCopy(csv);
+    } catch (final Exception e) {
+      logger.error(
+          "Failed to fetch bhavcopy for {}: {} {}",
+          dateStr,
+          e.getClass().getSimpleName(),
+          e.getMessage());
+      return Map.of();
+    }
+  }
+
+  private static Map<String, BhavCopyEntry> parseBhavCopy(final String csv) {
+    final Map<String, BhavCopyEntry> result = new HashMap<>();
+    final String[] lines = csv.split("\\r?\\n");
+    if (lines.length < 2) {
+      return result;
+    }
+    for (int i = 1; i < lines.length; i++) {
+      final String line = lines[i].trim();
+      if (line.isEmpty()) continue;
+      final String[] cols = line.split(",");
+      if (cols.length < 7) continue;
+      final String symbol = cols[0].trim();
+      final String series = cols[1].trim();
+      if (!"EQ".equals(series) && !"BE".equals(series)) continue;
+      try {
+        final BigDecimal high = new BigDecimal(cols[5].trim());
+        final BigDecimal low = new BigDecimal(cols[6].trim());
+        result.put(symbol, new BhavCopyEntry(high, low));
+      } catch (final NumberFormatException e) {
+        logger.debug("Skipping bhavcopy row with invalid numbers: {}", line);
+      }
+    }
+    logger.debug("Parsed {} bhavcopy entries", result.size());
+    return result;
+  }
+
+  public record BhavCopyEntry(BigDecimal high, BigDecimal low) {}
+
+  @JsonIgnoreProperties(ignoreUnknown = true)
+  public record PreOpenResponse(
+      @JsonProperty("advances") int advances,
+      @JsonProperty("declines") int declines,
+      @JsonProperty("unchanged") int unchanged,
+      @JsonProperty("data") List<PreOpenItem> data) {}
+
+  @JsonIgnoreProperties(ignoreUnknown = true)
+  public record PreOpenItem(@JsonProperty("metadata") PreOpenMetadata metadata) {}
+
+  @JsonIgnoreProperties(ignoreUnknown = true)
+  public record PreOpenMetadata(
+      @JsonProperty("symbol") String symbol,
+      @JsonProperty("lastPrice") BigDecimal lastPrice,
+      @JsonProperty("change") BigDecimal change,
+      @JsonProperty("pChange") BigDecimal pChange,
+      @JsonProperty("finalQuantity") long finalQuantity,
+      @JsonProperty("totalTurnover") BigDecimal totalTurnover,
+      @JsonProperty("iep") BigDecimal iep) {}
+
+  public PreOpenResponse fetchPreOpenData(final String key) {
+    ensureSession();
+    final String url = nseConfig.getPreOpenUrl(key);
+    logger.debug("Fetching pre-open market data for key={}", key);
+    try {
+      final String json =
+          webClient
+              .get()
+              .uri(url)
+              .header("User-Agent", nseConfig.getUserAgent())
+              .header("Accept", MediaType.APPLICATION_JSON_VALUE)
+              .header("Accept-Language", "en-US,en;q=0.9")
+              .header("Referer", nseConfig.getHomeUrl())
+              .header("Cookie", sessionCookie != null ? sessionCookie : "")
+              .retrieve()
+              .bodyToMono(String.class)
+              .block();
+      if (json == null || json.isBlank()) return null;
+      return objectMapper.readValue(json, PreOpenResponse.class);
+    } catch (final Exception e) {
+      logger.error(
+          "Failed to fetch pre-open data: {} {}", e.getClass().getSimpleName(), e.getMessage());
+      return null;
+    }
   }
 
   // ---- V3-specific DTOs (inner records) ----

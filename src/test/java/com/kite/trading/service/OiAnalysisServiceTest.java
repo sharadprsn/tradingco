@@ -12,7 +12,6 @@ import com.kite.trading.dto.OptionChainData;
 import com.kite.trading.dto.OptionChainData.OptionContract;
 import com.kite.trading.dto.OptionChainData.OptionData;
 import com.kite.trading.dto.OptionChainData.Records;
-import com.kite.trading.ml.MlService;
 import com.kite.trading.repository.OiSnapshotRepository;
 import java.math.BigDecimal;
 import java.time.Clock;
@@ -36,8 +35,6 @@ class OiAnalysisServiceTest {
 
   @Mock private OiSnapshotRepository snapshotRepository;
 
-  @Mock private MlService mlService;
-
   private final ObjectMapper objectMapper = new ObjectMapper();
 
   private OiAnalysisService service;
@@ -46,12 +43,9 @@ class OiAnalysisServiceTest {
   void setUp() {
     final Clock morningClock =
         Clock.fixed(Instant.parse("2026-07-16T04:30:00Z"), ZoneId.of("Asia/Kolkata"));
-    lenient()
-        .when(mlService.getSentiment())
-        .thenReturn(new MlService.SentimentResult(0.0, "neutral"));
     service =
         new OiAnalysisService(
-            nseClient, telegramService, snapshotRepository, objectMapper, mlService, morningClock);
+            nseClient, telegramService, snapshotRepository, objectMapper, morningClock);
   }
 
   @Test
@@ -183,7 +177,6 @@ class OiAnalysisServiceTest {
 
     assertNotNull(result);
     assertEquals("BULLISH", result.direction());
-    assertEquals("DIRECTIONAL PUT SELLING", result.suggestedStrategy());
   }
 
   @Test
@@ -219,7 +212,6 @@ class OiAnalysisServiceTest {
 
     assertNotNull(result);
     assertEquals("BEARISH", result.direction());
-    assertEquals("DIRECTIONAL CALL SELLING", result.suggestedStrategy());
   }
 
   @Test
@@ -254,98 +246,11 @@ class OiAnalysisServiceTest {
 
     assertNotNull(result);
     assertEquals("NEUTRAL", result.direction());
-    assertEquals("SHORT IRON CONDOR", result.suggestedStrategy());
   }
 
   @Test
   void analyzeAndPredict_returnsNull_whenNoSnapshots() {
     assertNull(service.analyzeAndPredict());
-  }
-
-  @Test
-  void notifyOiUpdate_sendsTelegram_whenSignificantChange() {
-    final var opt1 =
-        optionData(
-            BigDecimal.valueOf(24200),
-            contract(BigDecimal.valueOf(5000), BigDecimal.valueOf(500)),
-            contract(BigDecimal.valueOf(5000), BigDecimal.valueOf(200)));
-
-    when(nseClient.fetchOptionChain(anyString()))
-        .thenReturn(
-            new OptionChainData(
-                new Records(null, List.of(opt1), null, BigDecimal.valueOf(24200), null), null));
-
-    service.notifyOiUpdate();
-    verify(telegramService, times(1)).sendMessage(anyString());
-
-    final var opt2 =
-        optionData(
-            BigDecimal.valueOf(24200),
-            contract(BigDecimal.valueOf(10000), BigDecimal.valueOf(1500)),
-            contract(BigDecimal.valueOf(1000), BigDecimal.valueOf(200)));
-
-    when(nseClient.fetchOptionChain(anyString()))
-        .thenReturn(
-            new OptionChainData(
-                new Records(null, List.of(opt2), null, BigDecimal.valueOf(24250), null), null));
-
-    service.notifyOiUpdate();
-    verify(telegramService, times(2)).sendMessage(anyString());
-  }
-
-  @Test
-  void notifyOiUpdate_skipsTelegram_whenChangeBelowThreshold() {
-    final var option =
-        optionData(
-            BigDecimal.valueOf(24200),
-            contract(BigDecimal.valueOf(5000), BigDecimal.valueOf(100)),
-            contract(BigDecimal.valueOf(5000), BigDecimal.valueOf(100)));
-
-    when(nseClient.fetchOptionChain(anyString()))
-        .thenReturn(
-            new OptionChainData(
-                new Records(null, List.of(option), null, BigDecimal.valueOf(24200), null), null));
-
-    service.notifyOiUpdate();
-    verify(telegramService, times(1)).sendMessage(anyString());
-
-    service.notifyOiUpdate();
-    verify(telegramService, times(1)).sendMessage(anyString());
-  }
-
-  @Test
-  void notifyPrediction_sendsOncePerDay() {
-    final var firstOption =
-        optionData(
-            BigDecimal.valueOf(24200),
-            contract(BigDecimal.valueOf(10000), BigDecimal.valueOf(500)),
-            contract(BigDecimal.valueOf(5000), BigDecimal.valueOf(100)));
-
-    when(nseClient.fetchOptionChain(anyString()))
-        .thenReturn(
-            new OptionChainData(
-                new Records(null, List.of(firstOption), null, BigDecimal.valueOf(24200), null),
-                null));
-    service.fetchAndRecordOi();
-
-    final var secondOption =
-        optionData(
-            BigDecimal.valueOf(24200),
-            contract(BigDecimal.valueOf(10500), BigDecimal.valueOf(1000)),
-            contract(BigDecimal.valueOf(5000), BigDecimal.valueOf(100)));
-
-    when(nseClient.fetchOptionChain(anyString()))
-        .thenReturn(
-            new OptionChainData(
-                new Records(null, List.of(secondOption), null, BigDecimal.valueOf(24250), null),
-                null));
-    service.fetchAndRecordOi();
-
-    service.notifyPrediction();
-    verify(telegramService, times(1)).sendMessage(anyString());
-
-    service.notifyPrediction();
-    verify(telegramService, times(1)).sendMessage(anyString());
   }
 
   @Test
@@ -372,14 +277,6 @@ class OiAnalysisServiceTest {
     assertFalse(service.isPositionEntered());
     assertTrue(service.getSnapshots().isEmpty());
     assertNull(service.getLastAnalysis());
-    assertFalse(service.isPredictionSentToday());
-  }
-
-  @Test
-  void notifyOiUpdate_doesNotSend_whenDataIsNull() {
-    when(nseClient.fetchOptionChain(anyString())).thenReturn(null);
-    service.notifyOiUpdate();
-    verify(telegramService, never()).sendMessage(anyString());
   }
 
   @Test
@@ -602,7 +499,7 @@ class OiAnalysisServiceTest {
         Clock.fixed(Instant.parse("2026-07-16T09:45:00Z"), ZoneId.of("Asia/Kolkata"));
     final OiAnalysisService serviceWithFixedClock =
         new OiAnalysisService(
-            nseClient, telegramService, snapshotRepository, objectMapper, mlService, fixedClock);
+            nseClient, telegramService, snapshotRepository, objectMapper, fixedClock);
 
     final var peSellContract =
         contractWithPremium(
@@ -681,7 +578,6 @@ class OiAnalysisServiceTest {
 
     assertNotNull(result);
     assertEquals("NEUTRAL", result.direction());
-    assertEquals("NO_TRADE", result.suggestedStrategy());
     assertTrue(result.suggestedStrikes().isEmpty());
     assertTrue(result.tradeRecommendation().contains("NO TRADE"));
   }

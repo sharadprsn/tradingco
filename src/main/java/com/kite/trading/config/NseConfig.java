@@ -39,6 +39,24 @@ public class NseConfig {
     return "https://www.nseindia.com/api/quote-indices?indices=" + ticker;
   }
 
+  public String getEquityQuoteUrl(final String symbol) {
+    return "https://www.nseindia.com/api/quote-equity?symbol=" + symbol;
+  }
+
+  public String getEquityOptionChainUrl(final String symbol) {
+    return "https://www.nseindia.com/api/option-chain-v3?type=Equities&symbol=" + symbol;
+  }
+
+  public String getPreOpenUrl(final String key) {
+    return "https://www.nseindia.com/api/market-data-pre-open?key=" + key;
+  }
+
+  public String getBhavCopyUrl(final String dateStr) {
+    return "https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_"
+        + dateStr
+        + ".csv";
+  }
+
   public String getHomeUrl() {
     return homeUrl;
   }

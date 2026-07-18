@@ -10,7 +10,6 @@ import com.kite.trading.dto.OiDataSnapshot.OiStrikeInfo;
 import com.kite.trading.dto.OptionChainData;
 import com.kite.trading.dto.OptionChainData.OptionData;
 import com.kite.trading.entity.OiSnapshotEntity;
-import com.kite.trading.ml.MlService;
 import com.kite.trading.repository.OiSnapshotRepository;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -50,9 +49,6 @@ public class OiAnalysisService {
   private static final int STRIKE_INTERVAL_SENSEX = 100;
   private static final BigDecimal EXIT_PCR_SHIFT = BigDecimal.valueOf(0.3);
   private static final BigDecimal EXIT_OI_SURGE_PCT = BigDecimal.valueOf(0.03);
-  private static final BigDecimal MIN_PCR_CHANGE_FOR_NOTIFICATION = BigDecimal.valueOf(0.05);
-  private static final BigDecimal MIN_OI_CHANGE_FRACTION = BigDecimal.valueOf(0.05);
-
   // === Exit strategy constants ===
   private static final int CONFIRMATION_CONSECUTIVE = 2;
   private static final int PCR_VOLATILITY_WINDOW = 8;
@@ -102,7 +98,6 @@ public class OiAnalysisService {
   private final TelegramService telegramService;
   private final OiSnapshotRepository snapshotRepository;
   private final ObjectMapper objectMapper;
-  private final MlService mlService;
   private final Clock clock;
 
   private final List<OiDataSnapshot> snapshots = new CopyOnWriteArrayList<>();
@@ -112,10 +107,6 @@ public class OiAnalysisService {
   private final AtomicReference<OiDataSnapshot> lastNotifiedSnapshot = new AtomicReference<>();
   private volatile List<LocalDate> knownExpiryDates = List.of();
   private volatile boolean positionEntered;
-  private volatile boolean predictionSentToday;
-  private volatile String initialPredictionDirection = "NEUTRAL";
-  private volatile String lastNotifiedDirection = "NEUTRAL";
-
   // === Exit strategy improvement state ===
   private volatile ExitSignal lastDetectedSignal = ExitSignal.NONE;
   private volatile int confirmationStreak;
@@ -174,15 +165,8 @@ public class OiAnalysisService {
       final OptionChainClient optionChainClient,
       final TelegramService telegramService,
       final OiSnapshotRepository snapshotRepository,
-      final ObjectMapper objectMapper,
-      final MlService mlService) {
-    this(
-        optionChainClient,
-        telegramService,
-        snapshotRepository,
-        objectMapper,
-        mlService,
-        Clock.system(IST));
+      final ObjectMapper objectMapper) {
+    this(optionChainClient, telegramService, snapshotRepository, objectMapper, Clock.system(IST));
   }
 
   public OiAnalysisService(
@@ -190,13 +174,11 @@ public class OiAnalysisService {
       final TelegramService telegramService,
       final OiSnapshotRepository snapshotRepository,
       final ObjectMapper objectMapper,
-      final MlService mlService,
       final Clock clock) {
     this.optionChainClient = optionChainClient;
     this.telegramService = telegramService;
     this.snapshotRepository = snapshotRepository;
     this.objectMapper = objectMapper;
-    this.mlService = mlService;
     this.clock = clock;
   }
 
@@ -319,9 +301,7 @@ public class OiAnalysisService {
             ? buildUpList.subList(0, TOP_STRIKES_COUNT)
             : buildUpList;
 
-    final MlService.SentimentResult sentiment = mlService.getSentiment();
-    final BigDecimal marketSentimentVal =
-        sentiment != null ? BigDecimal.valueOf(sentiment.score()) : BigDecimal.ZERO;
+    final BigDecimal marketSentimentVal = BigDecimal.ZERO;
 
     final OiDataSnapshot snapshot =
         new OiDataSnapshot(
@@ -492,76 +472,13 @@ public class OiAnalysisService {
           .append(" since first snapshot. ");
     }
 
-    String strategy = suggestStrategy(direction);
     final List<BigDecimal> suggestedStrikes = pickStrikes(direction, latest, confidence);
 
     String finalDirection = direction;
     BigDecimal finalConfidence = confidence;
     if (suggestedStrikes.isEmpty()) {
-      strategy = "NO_TRADE";
       finalDirection = "NEUTRAL";
       finalConfidence = BigDecimal.ZERO;
-    }
-
-    if (mlService.isModelLoaded() && !"NO_TRADE".equals(strategy)) {
-      final MlService.WeightedPredictResult weightedResult = mlService.weightedPredict(snapshots);
-      if (weightedResult != null) {
-        final double mlConfPct = weightedResult.confidence() * 100;
-        final BigDecimal blendWeight = BigDecimal.valueOf(weightedResult.blendWeight());
-        final BigDecimal ruleWeight = BigDecimal.ONE.subtract(blendWeight);
-        // Weighted blend: final = ruleWeight * rule + blendWeight * ML
-        final BigDecimal blendedConfidence;
-        final String blendedDirection;
-        if (weightedResult.direction().equals(finalDirection)) {
-          blendedConfidence =
-              BigDecimal.valueOf(mlConfPct)
-                  .multiply(blendWeight)
-                  .add(finalConfidence.multiply(ruleWeight));
-          blendedDirection = finalDirection;
-          reasoning
-              .append("ML agrees (")
-              .append(weightedResult.direction())
-              .append(", ")
-              .append(String.format("%.1f", mlConfPct))
-              .append("%, weight=")
-              .append(String.format("%.2f", weightedResult.blendWeight()))
-              .append("). ");
-        } else {
-          final double confDiff = mlConfPct - finalConfidence.doubleValue();
-          if (confDiff > 15.0 && weightedResult.blendWeight() > 0.5) {
-            blendedDirection = weightedResult.direction();
-            blendedConfidence =
-                finalConfidence
-                    .multiply(ruleWeight)
-                    .add(BigDecimal.valueOf(mlConfPct).multiply(blendWeight));
-            reasoning
-                .append("ML overrides (")
-                .append(weightedResult.direction())
-                .append(", ")
-                .append(String.format("%.1f", mlConfPct))
-                .append("%, weight=")
-                .append(String.format("%.2f", weightedResult.blendWeight()))
-                .append("). ");
-          } else {
-            blendedDirection = finalDirection;
-            blendedConfidence = finalConfidence;
-            reasoning
-                .append("Rules prevail (")
-                .append(finalDirection)
-                .append(", ")
-                .append(finalConfidence.setScale(1, RoundingMode.HALF_UP))
-                .append("%) over ML (")
-                .append(weightedResult.direction())
-                .append(", ")
-                .append(String.format("%.1f", mlConfPct))
-                .append("%, weight=")
-                .append(String.format("%.2f", weightedResult.blendWeight()))
-                .append("). ");
-          }
-        }
-        finalDirection = blendedDirection;
-        finalConfidence = blendedConfidence.min(BigDecimal.valueOf(95));
-      }
     }
 
     final BigDecimal sentimentScore =
@@ -606,7 +523,6 @@ public class OiAnalysisService {
             finalDirection,
             finalConfidence,
             latestPcr,
-            strategy,
             suggestedStrikes,
             reasoning.toString().strip(),
             tradeRecommendation,
@@ -618,11 +534,10 @@ public class OiAnalysisService {
 
     lastAnalysis.set(result);
     logger.info(
-        "OI Analysis for {}: direction={}, confidence={}, strategy={}, pcr={}, strikes={}, vix={}",
+        "OI Analysis for {}: direction={}, confidence={}, pcr={}, strikes={}, vix={}",
         currentIndex,
         direction,
         confidence,
-        strategy,
         latestPcr,
         suggestedStrikes,
         vix);
@@ -744,8 +659,6 @@ public class OiAnalysisService {
           .append(": ")
           .append(result.marketSentiment().setScale(2, RoundingMode.HALF_UP));
     }
-
-    sb.append("\n\nSuggested Strategy: ").append(result.suggestedStrategy());
 
     if (result.tradeRecommendation() != null && !result.tradeRecommendation().isBlank()) {
       sb.append("\n\nTrade Recommendation:\n").append(result.tradeRecommendation());
@@ -1004,9 +917,7 @@ public class OiAnalysisService {
           .append(newRecommendation.direction())
           .append(" (")
           .append(newRecommendation.confidence())
-          .append("%)")
-          .append("\nStrategy: ")
-          .append(newRecommendation.suggestedStrategy());
+          .append("%)");
       if (newRecommendation.tradeRecommendation() != null
           && !newRecommendation.tradeRecommendation().isBlank()) {
         sb.append("\n").append(newRecommendation.tradeRecommendation());
@@ -1014,30 +925,6 @@ public class OiAnalysisService {
     }
 
     return sb.toString();
-  }
-
-  public void notifyPrediction() {
-    if (predictionSentToday) {
-      return;
-    }
-    final OiAnalysisResult result = analyzeAndPredict();
-    if (result != null) {
-      final String report = buildPredictionReport(result, "10:00 AM");
-      telegramService.sendMessage(report);
-      predictionSentToday = true;
-      initialPredictionDirection = result.direction();
-      // Record prediction for ML accuracy tracking
-      if (!snapshots.isEmpty()) {
-        final OiDataSnapshot first = snapshots.getFirst();
-        final double entryVal =
-            first.underlyingValue() != null ? first.underlyingValue().doubleValue() : 0.0;
-        mlService.recordPrediction(
-            result.direction(),
-            result.confidence().doubleValue() / 100.0,
-            entryVal > 0 ? 0.0 : 0.0);
-      }
-      logger.info("Prediction sent via Telegram: {}", result.direction());
-    }
   }
 
   /**
@@ -1180,72 +1067,6 @@ public class OiAnalysisService {
     return true;
   }
 
-  public void reprocessPrediction(final String timeLabel) {
-    if (snapshots.isEmpty()) {
-      logger.warn("No snapshots available for reprocessing at {}", timeLabel);
-      return;
-    }
-    final OiAnalysisResult result = analyzeAndPredict();
-    if (result != null) {
-      final String report = buildPredictionReport(result, timeLabel);
-      telegramService.sendMessage(report);
-      logger.info(
-          "Reprocessed prediction sent via Telegram at {}: {}", timeLabel, result.direction());
-    }
-  }
-
-  public void notifyOiUpdate() {
-    final OiDataSnapshot snapshot = fetchAndRecordOi();
-    if (snapshot == null) {
-      return;
-    }
-
-    final OiDataSnapshot lastNotified = lastNotifiedSnapshot.get();
-    if (lastNotified != null && !hasChangedSignificantly(snapshot, lastNotified)) {
-      logger.debug("OI change below notification threshold, skipping");
-      return;
-    }
-
-    final String report = buildOiReport(snapshot);
-    telegramService.sendMessage(report);
-    lastNotifiedSnapshot.set(snapshot);
-  }
-
-  private boolean hasChangedSignificantly(
-      final OiDataSnapshot current, final OiDataSnapshot previous) {
-    final BigDecimal pcrDiff = current.pcr().subtract(previous.pcr()).abs();
-    if (pcrDiff.compareTo(MIN_PCR_CHANGE_FOR_NOTIFICATION) > 0) {
-      return true;
-    }
-
-    final BigDecimal peOiChange =
-        safeOi(current.totalPeOiChange())
-            .abs()
-            .subtract(safeOi(previous.totalPeOiChange()).abs())
-            .abs();
-    final BigDecimal ceOiChange =
-        safeOi(current.totalCeOiChange())
-            .abs()
-            .subtract(safeOi(previous.totalCeOiChange()).abs())
-            .abs();
-
-    final BigDecimal prevPeOi = safeOi(previous.totalPeOi());
-    if (prevPeOi.compareTo(BigDecimal.ZERO) > 0
-        && peOiChange.divide(prevPeOi, 4, RoundingMode.HALF_UP).compareTo(MIN_OI_CHANGE_FRACTION)
-            > 0) {
-      return true;
-    }
-
-    final BigDecimal prevCeOi = safeOi(previous.totalCeOi());
-    if (prevCeOi.compareTo(BigDecimal.ZERO) > 0
-        && ceOiChange.divide(prevCeOi, 4, RoundingMode.HALF_UP).compareTo(MIN_OI_CHANGE_FRACTION)
-            > 0) {
-      return true;
-    }
-
-    return false;
-  }
-
   public void notifyExitIfNeeded() {
     final ExitAssessment assessment = computeExitAssessment();
     if (assessment.signal() != ExitSignal.NONE) {
@@ -1292,8 +1113,8 @@ public class OiAnalysisService {
     }
     final OiAnalysisResult analysis = lastAnalysis.get();
     if (analysis != null && !analysis.suggestedStrikes().isEmpty()) {
-      final String strategy = analysis.suggestedStrategy();
-      if ("DIRECTIONAL PUT SELLING".equals(strategy)) {
+      final String direction = analysis.direction();
+      if ("BULLISH".equals(direction)) {
         this.entrySoldStrike = analysis.suggestedStrikes().get(0);
         this.entryStrikeType = "PE";
         this.entrySoldPremium =
@@ -1307,7 +1128,7 @@ public class OiAnalysisService {
             (current != null && hedge != null)
                 ? lookupPremium(current, this.entryHedgeStrike, "PE")
                 : BigDecimal.ZERO;
-      } else if ("DIRECTIONAL CALL SELLING".equals(strategy)) {
+      } else if ("BEARISH".equals(direction)) {
         this.entrySoldStrike = analysis.suggestedStrikes().get(0);
         this.entryStrikeType = "CE";
         this.entrySoldPremium =
@@ -1321,7 +1142,7 @@ public class OiAnalysisService {
             (current != null && hedge != null)
                 ? lookupPremium(current, this.entryHedgeStrike, "CE")
                 : BigDecimal.ZERO;
-      } else if ("SHORT IRON CONDOR".equals(strategy)) {
+      } else if ("NEUTRAL".equals(direction)) {
         this.entrySoldStrike = analysis.suggestedStrikes().get(0); // Short Put
         this.entryHedgeStrike =
             analysis.suggestedStrikes().size() > 1
@@ -1334,7 +1155,6 @@ public class OiAnalysisService {
             (current != null && this.entryHedgeStrike.compareTo(BigDecimal.ZERO) > 0)
                 ? lookupPremium(current, this.entryHedgeStrike, "CE")
                 : BigDecimal.ZERO;
-        // Bought wings further OTM at delta ~0.05
         final double daysToExpiryWing = computeDaysToExpiry();
         final List<OiDataSnapshot.StrikePremium> premiums =
             current != null ? current.strikePremiums() : List.of();
@@ -1378,10 +1198,9 @@ public class OiAnalysisService {
     this.earlyWarningSent = false;
     this.cumulativeExitFraction = BigDecimal.ZERO;
     logger.info(
-        "Position entry recorded for OI monitoring at price={} direction={} strategy={} soldStrike={} (premium={}) hedgeStrike={} (premium={})",
+        "Position entry recorded for OI monitoring at price={} direction={} soldStrike={} (premium={}) hedgeStrike={} (premium={})",
         entryPrice,
         entryDirection,
-        analysis != null ? analysis.suggestedStrategy() : "NONE",
         entrySoldStrike,
         entrySoldPremium,
         entryHedgeStrike,
@@ -1414,9 +1233,6 @@ public class OiAnalysisService {
     entrySnapshot.set(null);
     lastNotifiedSnapshot.set(null);
     positionEntered = false;
-    predictionSentToday = false;
-    initialPredictionDirection = "NEUTRAL";
-    lastNotifiedDirection = "NEUTRAL";
     lastDetectedSignal = ExitSignal.NONE;
     confirmationStreak = 0;
     entryPrice = BigDecimal.ZERO;
@@ -1449,43 +1265,6 @@ public class OiAnalysisService {
 
   public boolean isPositionEntered() {
     return positionEntered;
-  }
-
-  public boolean isPredictionSentToday() {
-    return predictionSentToday;
-  }
-
-  public String getInitialPredictionDirection() {
-    return initialPredictionDirection;
-  }
-
-  public void checkAndNotifyDirectionChange() {
-    if (!predictionSentToday) {
-      return;
-    }
-    final OiAnalysisResult result = analyzeAndPredict();
-    if (result == null) {
-      return;
-    }
-    final String current = result.direction();
-    if (current.equals(initialPredictionDirection) || current.equals(lastNotifiedDirection)) {
-      return;
-    }
-    lastNotifiedDirection = current;
-    final LocalTime now = LocalTime.now(clock);
-    final String timeLabel =
-        String.format(
-            "%d:%02d %s",
-            now.getHour() > 12 ? now.getHour() - 12 : now.getHour(),
-            now.getMinute(),
-            now.getHour() >= 12 ? "PM" : "AM");
-    final String report = buildPredictionReport(result, timeLabel);
-    telegramService.sendMessage(report);
-    logger.info(
-        "Direction change prediction sent at {}: {} (was {})",
-        timeLabel,
-        current,
-        initialPredictionDirection);
   }
 
   private String buildTradeRecommendation(
@@ -1858,14 +1637,6 @@ public class OiAnalysisService {
     // ──────────────────────────────────────────────────────────────────────────
 
     return rec.toString();
-  }
-
-  private String suggestStrategy(final String direction) {
-    return switch (direction) {
-      case "BULLISH" -> "DIRECTIONAL PUT SELLING";
-      case "BEARISH" -> "DIRECTIONAL CALL SELLING";
-      default -> "SHORT IRON CONDOR";
-    };
   }
 
   private List<BigDecimal> pickStrikes(
