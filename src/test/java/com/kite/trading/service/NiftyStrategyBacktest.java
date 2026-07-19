@@ -14,6 +14,7 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -49,6 +50,7 @@ class NiftyStrategyBacktest {
   private static final String API_URL = "http://localhost:5000/api/ohlc/auto";
 
   @Test
+  @Tag("requiresLocalApi")
   void runOneMonthBacktest() throws Exception {
     final List<OhlcCandle> bars5m = fetchBars("^NSEI", "5m", 400);
     final LocalDateTime last = bars5m.getLast().timestamp();

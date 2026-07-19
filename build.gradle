@@ -55,7 +55,12 @@ spotless {
 }
 
 tasks.named('test') {
-    useJUnitPlatform()
+    useJUnitPlatform {
+        // NiftyStrategyBacktest requires a local nse-ohlc-api (localhost:5000) that is not part of
+        // the build environment; exclude it so `clean build` succeeds offline. Run it explicitly
+        // when the API is available.
+        excludeTags 'requiresLocalApi'
+    }
 }
 
 tasks.named('compileJava') {
