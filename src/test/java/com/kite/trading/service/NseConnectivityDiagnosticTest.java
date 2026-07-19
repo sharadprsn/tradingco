@@ -12,6 +12,7 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.List;
 import java.util.stream.Collectors;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -81,6 +82,7 @@ class NseConnectivityDiagnosticTest {
   }
 
   @Test
+  @Disabled("requires live NSE network access")
   void testIndexQuoteEndpoint() {
     logger.info("=== Test: Index Quote Endpoint ===");
     final String symbol = "NIFTY";
@@ -134,6 +136,7 @@ class NseConnectivityDiagnosticTest {
   }
 
   @Test
+  @Disabled("requires live NSE network access")
   void testContractInfoEndpoint() {
     logger.info("=== Test: Contract Info Endpoint ===");
     final String symbol = "NIFTY";
@@ -188,6 +191,7 @@ class NseConnectivityDiagnosticTest {
   }
 
   @Test
+  @Disabled("requires live NSE network access")
   void testOptionChainEndpoint() {
     logger.info("=== Test: Option Chain Endpoint ===");
     final String symbol = "NIFTY";

@@ -170,15 +170,20 @@ class MultiTfRSINiftyOptionServiceTest {
 
   @Test
   void evaluate_shouldGenerateSignalWhenRsiAlignedAndPatternDetected() {
-    final int ticksNeeded = 5 * 35;
-    for (int i = 0; i < ticksNeeded; i++) {
-      final BigDecimal price = BigDecimal.valueOf(i < 70 ? 24500 - i : 24430L + (i - 70L) * 2L);
-      mockNiftyQuote(price);
-      service.evaluate();
+    // 35 five-minute candles whose closes oscillate (real gains and losses) around a slight
+    // uptrend, so 5m RSI settles inside the entry band (40,70] while staying above its SMA.
+    BigDecimal candleClose = BigDecimal.valueOf(24000);
+    for (int c = 0; c < 35; c++) {
+      final long swing = (c % 2 == 0) ? 12L : -10L;
+      candleClose = candleClose.add(BigDecimal.valueOf(swing));
+      for (int t = 0; t < 5; t++) {
+        mockNiftyQuote(candleClose);
+        service.evaluate();
+      }
     }
     when(patternService.detectPatterns(anyList())).thenReturn(List.of("BULLISH_ENGULFING"));
-    mockOptionChain("CE", BigDecimal.valueOf(24500), BigDecimal.valueOf(80));
-    mockNiftyQuote(BigDecimal.valueOf(24500));
+    mockOptionChain("CE", BigDecimal.valueOf(24050), BigDecimal.valueOf(80));
+    mockNiftyQuote(candleClose);
     service.evaluate();
     assertFalse(service.getSignals().isEmpty());
   }
@@ -252,9 +257,6 @@ class MultiTfRSINiftyOptionServiceTest {
     mockOptionChain("CE", BigDecimal.valueOf(24500), BigDecimal.valueOf(80));
     mockNiftyQuote(BigDecimal.valueOf(24500));
     service.evaluate();
-    final MultiTfRSINiftyOptionService.TfState dbg = getState();
-    System.out.println(
-        "DEBUG stateNull=" + (dbg == null) + " signals=" + service.getSignals().size());
     assertFalse(service.getSignals().isEmpty());
   }
 
@@ -277,12 +279,10 @@ class MultiTfRSINiftyOptionServiceTest {
     BigDecimal price = BigDecimal.valueOf(24200);
     for (int i = 0; i < count; i++) {
       final BigDecimal open = price;
-      final BigDecimal close;
-      if (i < count - 8) {
-        close = open.subtract(BigDecimal.valueOf(5));
-      } else {
-        close = open.add(BigDecimal.valueOf(25));
-      }
+      // Oscillating uptrend (real gains and losses) so 5m RSI lands in the entry band (40,70]
+      // and ends on an up-close so RSI finishes above its SMA.
+      final BigDecimal close =
+          (i % 2 == 0) ? open.subtract(BigDecimal.valueOf(10)) : open.add(BigDecimal.valueOf(12));
       final OhlcCandle c = new OhlcCandle(t, open, close, open, close);
       candles.add(c);
       price = close;
