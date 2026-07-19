@@ -34,11 +34,19 @@ public class MultiTfRSINiftyOptionService {
   private static final LocalTime TRADE_END = LocalTime.of(11, 30);
   private static final LocalTime MARKET_END = LocalTime.of(15, 30);
 
-  private static final int RSI_PERIOD = 14;
-  private static final int SMA_PERIOD = 20;
+  static final int RSI_PERIOD = 14;
+  static final int SMA_PERIOD = 20;
   private static final BigDecimal MIN_PREMIUM = BigDecimal.valueOf(60);
   private static final BigDecimal MAX_PREMIUM = BigDecimal.valueOf(100);
-  private static final int MAX_TRADES_PER_DAY = 1;
+  static final int MAX_TRADES_PER_DAY = 2;
+
+  // Risk-management bands (do not alter the RSI/SMA indicators themselves).
+  static final BigDecimal RSI_LONG_MIN = BigDecimal.valueOf(40);
+  static final BigDecimal RSI_LONG_MAX = BigDecimal.valueOf(70);
+  static final BigDecimal RSI_SHORT_MIN = BigDecimal.valueOf(30);
+  static final BigDecimal RSI_SHORT_MAX = BigDecimal.valueOf(60);
+  static final BigDecimal STOP_PCT = BigDecimal.valueOf(0.0035);
+  static final BigDecimal TARGET_PCT = BigDecimal.valueOf(0.0075);
 
   static final int FIVE_MIN_CANDLES = 5;
   static final int FIFTEEN_MIN_CANDLES = 3;
@@ -50,7 +58,8 @@ public class MultiTfRSINiftyOptionService {
 
   private final List<TfState> states = new CopyOnWriteArrayList<>();
   private final List<MultiTfRSINiftySignal> signals = new CopyOnWriteArrayList<>();
-  private int tradesToday;
+  private int longTradesToday;
+  private int shortTradesToday;
 
   @Autowired
   public MultiTfRSINiftyOptionService(
@@ -70,6 +79,9 @@ public class MultiTfRSINiftyOptionService {
     this.telegramService = telegramService;
     this.clock = clock;
   }
+
+  private static final int SEED_CANDLES_5M = 100;
+  private static final int SEED_CANDLES_15M = 40;
 
   public void evaluate() {
     final LocalTime now = LocalTime.now(clock);
@@ -95,6 +107,7 @@ public class MultiTfRSINiftyOptionService {
     }
 
     final TfState state = getOrCreateState();
+    ensureSeeded(state);
     final OhlcCandle tickCandle =
         new OhlcCandle(
             LocalDateTime.now(clock),
@@ -114,15 +127,16 @@ public class MultiTfRSINiftyOptionService {
     updateRsi(state, state.candles5, state.rsi5, state.rsiSma5, true);
     updateRsi(state, state.candles15, state.rsi15, state.rsiSma15, false);
 
+    final int tradesToday = longTradesToday + shortTradesToday;
     if (tradesToday >= MAX_TRADES_PER_DAY) {
       if (state.inTrade) {
-        checkExit(state, now);
+        checkExit(state, now, nifty.lastPrice());
       }
       return;
     }
 
     if (state.inTrade) {
-      checkExit(state, now);
+      checkExit(state, now, nifty.lastPrice());
       return;
     }
 
@@ -138,7 +152,79 @@ public class MultiTfRSINiftyOptionService {
     return states.getFirst();
   }
 
-  private void buildFiveMinCandle(final TfState state) {
+  private void ensureSeeded(final TfState state) {
+    if (state.seeded) {
+      return;
+    }
+    seedHistory(state);
+    state.seeded = true;
+  }
+
+  /**
+   * Warms up RSI(14) and its SMA(20) by seeding completed-session OHLC history so the 15m RSI is
+   * valid from the first bar of the trading day. Only the last completed trading session's candles
+   * are used (today's live bar comes from NSE ticks). Falls back to live-only behaviour if seeding
+   * fails.
+   */
+  private void seedHistory(final TfState state) {
+    try {
+      final List<OhlcCandle> candles15 =
+          lastCompletedSession(optionChainClient.fetchIndexCandles("15m", SEED_CANDLES_15M));
+      final List<OhlcCandle> candles5 =
+          lastCompletedSession(optionChainClient.fetchIndexCandles("5m", SEED_CANDLES_5M));
+
+      if (candles15.size() < RSI_PERIOD + 1 || candles5.size() < RSI_PERIOD + 1) {
+        logger.warn(
+            "Insufficient seeded history (5m={}, 15m={}); RSI will warm up live only",
+            candles5.size(),
+            candles15.size());
+        return;
+      }
+
+      state.candles15.addAll(candles15);
+      state.candles5.addAll(candles5);
+
+      updateRsi(state, state.candles5, state.rsi5, state.rsiSma5, true);
+      updateRsi(state, state.candles15, state.rsi15, state.rsiSma15, false);
+
+      logger.info(
+          "Seeded RSI history: 5m={} bars (rsi={}, sma={}), 15m={} bars (rsi={}, sma={})",
+          state.candles5.size(),
+          state.rsi5.size(),
+          state.rsiSma5.size(),
+          state.candles15.size(),
+          state.rsi15.size(),
+          state.rsiSma15.size());
+    } catch (final Exception e) {
+      logger.warn("Failed to seed RSI history, falling back to live-only: {}", e.getMessage());
+    }
+  }
+
+  private static List<OhlcCandle> lastCompletedSession(final List<OhlcCandle> candles) {
+    if (candles.isEmpty()) {
+      return candles;
+    }
+    final LocalDate today = LocalDate.now();
+    LocalDate latestDate = null;
+    for (final OhlcCandle c : candles) {
+      final LocalDate d = c.timestamp().toLocalDate();
+      if (latestDate == null || d.isAfter(latestDate)) {
+        latestDate = d;
+      }
+    }
+    if (latestDate == null || latestDate.isEqual(today)) {
+      return candles;
+    }
+    final List<OhlcCandle> result = new ArrayList<>();
+    for (final OhlcCandle c : candles) {
+      if (c.timestamp().toLocalDate().isEqual(latestDate)) {
+        result.add(c);
+      }
+    }
+    return result;
+  }
+
+  void buildFiveMinCandle(final TfState state) {
     state.tickCount5++;
     if (state.tickCount5 < FIVE_MIN_CANDLES) {
       final OhlcCandle tick = state.oneMinTicks.getLast();
@@ -158,13 +244,10 @@ public class MultiTfRSINiftyOptionService {
     state.tickCount5 = 0;
     final OhlcCandle finalCandle = closeRunningCandle(state, state.runningCandle5);
     state.candles5.add(finalCandle);
-    if (state.candles5.size() > SMA_PERIOD + RSI_PERIOD) {
-      state.candles5.removeFirst();
-    }
     state.runningCandle5 = null;
   }
 
-  private void buildFifteenMinCandle(final TfState state) {
+  void buildFifteenMinCandle(final TfState state) {
     state.tickCount15++;
     if (state.tickCount15 < FIFTEEN_MIN_CANDLES) {
       final OhlcCandle tick = state.oneMinTicks.getLast();
@@ -184,9 +267,6 @@ public class MultiTfRSINiftyOptionService {
     state.tickCount15 = 0;
     final OhlcCandle finalCandle = closeRunningCandle(state, state.runningCandle15);
     state.candles15.add(finalCandle);
-    if (state.candles15.size() > SMA_PERIOD + RSI_PERIOD) {
-      state.candles15.removeFirst();
-    }
     state.runningCandle15 = null;
   }
 
@@ -292,10 +372,21 @@ public class MultiTfRSINiftyOptionService {
     final boolean rsi15Bullish = isRsiBullish(state.rsi15, state.rsiSma15);
     final boolean rsi15Bearish = isRsiBearish(state.rsi15, state.rsiSma15);
 
+    if (state.rsi5.isEmpty() || state.rsi15.isEmpty()) {
+      return;
+    }
+
+    final BigDecimal rsi5 = state.rsi5.getLast();
+    final BigDecimal rsi15 = state.rsi15.getLast();
+
+    final boolean longBand = rsi5.compareTo(RSI_LONG_MIN) > 0 && rsi5.compareTo(RSI_LONG_MAX) <= 0;
+    final boolean shortBand =
+        rsi5.compareTo(RSI_SHORT_MIN) >= 0 && rsi5.compareTo(RSI_SHORT_MAX) < 0;
+
     final List<String> patterns = patternService.detectPatterns(state.candles5);
     final boolean hasPattern = !patterns.isEmpty();
 
-    if (rsi15Bullish && rsi5Bullish && hasPattern) {
+    if (rsi15Bullish && rsi5Bullish && longBand && longTradesToday < 1 && hasPattern) {
       final OptionContract callContract = findSuitableStrike(spotPrice, "CE");
       if (callContract != null) {
         generateSignal(
@@ -313,7 +404,7 @@ public class MultiTfRSINiftyOptionService {
       return;
     }
 
-    if (rsi15Bearish && rsi5Bearish && hasPattern) {
+    if (rsi15Bearish && rsi5Bearish && shortBand && shortTradesToday < 1 && hasPattern) {
       final OptionContract putContract = findSuitableStrike(spotPrice, "PE");
       if (putContract != null) {
         generateSignal(
@@ -418,7 +509,12 @@ public class MultiTfRSINiftyOptionService {
     state.direction = direction;
     state.entryRsi5 = state.rsi5.isEmpty() ? BigDecimal.ZERO : state.rsi5.getLast();
     state.entryRsi15 = state.rsi15.isEmpty() ? BigDecimal.ZERO : state.rsi15.getLast();
-    tradesToday++;
+    state.entrySpot = spotPrice;
+    if ("LONG".equals(direction)) {
+      longTradesToday++;
+    } else {
+      shortTradesToday++;
+    }
 
     logger.info(
         "{} signal: {} {} strike={} premium={} spot={} patterns={}",
@@ -466,22 +562,43 @@ public class MultiTfRSINiftyOptionService {
     telegramService.sendMessage(message);
   }
 
-  private void checkExit(final TfState state, final LocalTime now) {
+  private void checkExit(final TfState state, final LocalTime now, final BigDecimal spotPrice) {
     final boolean rsi5Bullish = isRsiBullish(state.rsi5, state.rsiSma5);
     final boolean rsi5Bearish = isRsiBearish(state.rsi5, state.rsiSma5);
     final boolean rsi15Bullish = isRsiBullish(state.rsi15, state.rsiSma15);
     final boolean rsi15Bearish = isRsiBearish(state.rsi15, state.rsiSma15);
 
+    // Directional exit on the entry timeframe (5m) RSI cross only.
     final boolean exitSignal = "LONG".equals(state.direction) ? !rsi5Bullish : !rsi5Bearish;
 
+    // Hard stop / take-profit on the underlying move (option buy must clear theta).
+    final BigDecimal movePct =
+        spotPrice.subtract(state.entrySpot).divide(state.entrySpot, 6, RoundingMode.HALF_UP);
+    final boolean stopped =
+        "LONG".equals(state.direction)
+            ? movePct.compareTo(STOP_PCT.negate()) <= 0
+            : movePct.compareTo(STOP_PCT) >= 0;
+    final boolean targetHit =
+        "LONG".equals(state.direction)
+            ? movePct.compareTo(TARGET_PCT) >= 0
+            : movePct.compareTo(TARGET_PCT.negate()) <= 0;
+
+    // Soft 15m conflict: only exits early when the higher timeframe fully flips against us,
+    // avoiding premature exits on a transient 15m dip mid-trend.
     final boolean conflict =
         "LONG".equals(state.direction)
             ? (!rsi15Bullish && !rsi5Bullish)
             : (!rsi15Bearish && !rsi5Bearish);
 
-    if (exitSignal || conflict || now.isAfter(TRADE_END)) {
+    if (stopped || targetHit || exitSignal || conflict || now.isAfter(TRADE_END)) {
       final BigDecimal exitPremium = fetchCurrentPremium(state);
-      notifyExit(state, exitPremium, exitSignal ? "RSI CROSS" : "CONFLICT");
+      final String reason =
+          targetHit
+              ? "TARGET"
+              : stopped
+                  ? "STOP"
+                  : exitSignal ? "RSI CROSS" : now.isAfter(TRADE_END) ? "EOD" : "CONFLICT";
+      notifyExit(state, exitPremium, reason);
       resetState(state);
     }
   }
@@ -532,7 +649,8 @@ public class MultiTfRSINiftyOptionService {
   public void resetDaily() {
     states.clear();
     signals.clear();
-    tradesToday = 0;
+    longTradesToday = 0;
+    shortTradesToday = 0;
     logger.info("Multi-TF RSI Nifty Option state reset");
   }
 
@@ -557,6 +675,8 @@ public class MultiTfRSINiftyOptionService {
   }
 
   static class TfState {
+    boolean seeded;
+
     final List<OhlcCandle> oneMinTicks = new ArrayList<>();
     final List<OhlcCandle> candles5 = new ArrayList<>();
     final List<OhlcCandle> candles15 = new ArrayList<>();
@@ -575,6 +695,7 @@ public class MultiTfRSINiftyOptionService {
     MultiTfRSINiftySignal activeSignal;
     BigDecimal entryRsi5 = BigDecimal.ZERO;
     BigDecimal entryRsi15 = BigDecimal.ZERO;
+    BigDecimal entrySpot = BigDecimal.ZERO;
 
     BigDecimal prevAvgGain5;
     BigDecimal prevAvgLoss5;

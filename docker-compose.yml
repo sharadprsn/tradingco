@@ -1,7 +1,23 @@
 services:
+  nse-ohlc-api:
+    image: sharadprsn/nse-ohlc-api:latest
+    container_name: nse-ohlc-api
+    ports:
+      - "5000:5000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:5000/health',timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
   kite-trading:
     image: sharadprsn/kite-trading:latest
     container_name: kite-trading
+    depends_on:
+      nse-ohlc-api:
+        condition: service_healthy
     ports:
       - "443:443"
     environment:

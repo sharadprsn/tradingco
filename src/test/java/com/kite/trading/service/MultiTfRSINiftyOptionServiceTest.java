@@ -1,7 +1,9 @@
 package com.kite.trading.service;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 import com.kite.trading.dto.IndexQuote;
@@ -198,6 +200,95 @@ class MultiTfRSINiftyOptionServiceTest {
   void resetDaily_shouldClearAllState() {
     service.resetDaily();
     assertTrue(service.getSignals().isEmpty());
+  }
+
+  @Test
+  void evaluate_shouldSeedHistoricalCandlesOnFirstTick() {
+    when(nseClient.fetchIndexCandles(eq("15m"), anyInt())).thenReturn(historicalCandles(15, 40));
+    when(nseClient.fetchIndexCandles(eq("5m"), anyInt())).thenReturn(historicalCandles(5, 100));
+    mockNiftyQuote(BigDecimal.valueOf(24100));
+    service.evaluate();
+    verify(nseClient).fetchIndexCandles("15m", 40);
+    verify(nseClient).fetchIndexCandles("5m", 100);
+    final MultiTfRSINiftyOptionService.TfState state = getState();
+    assertNotNull(state);
+    assertTrue(state.seeded);
+    assertTrue(state.candles15.size() >= 34);
+    assertTrue(state.candles5.size() >= 34);
+    assertEquals(26, state.rsi15.size());
+    assertEquals(1, state.rsiSma15.size());
+  }
+
+  @Test
+  void evaluate_shouldNotReseedAfterFirstTick() {
+    when(nseClient.fetchIndexCandles(eq("15m"), anyInt())).thenReturn(historicalCandles(15, 40));
+    when(nseClient.fetchIndexCandles(eq("5m"), anyInt())).thenReturn(historicalCandles(5, 100));
+    mockNiftyQuote(BigDecimal.valueOf(24100));
+    service.evaluate();
+    service.evaluate();
+    verify(nseClient, times(1)).fetchIndexCandles("15m", 40);
+    verify(nseClient, times(1)).fetchIndexCandles("5m", 100);
+  }
+
+  @Test
+  void evaluate_shouldFallBackToLiveOnlyWhenSeedEmpty() {
+    when(nseClient.fetchIndexCandles(anyString(), anyInt())).thenReturn(List.of());
+    mockNiftyQuote(BigDecimal.valueOf(24100));
+    service.evaluate();
+    final MultiTfRSINiftyOptionService.TfState state = getState();
+    assertNotNull(state);
+    assertTrue(state.seeded);
+    assertEquals(0, state.candles15.size());
+    assertEquals(0, state.rsi15.size());
+  }
+
+  @Test
+  void evaluate_shouldGenerateSignalEarlyWithSeededHistory() {
+    when(nseClient.fetchIndexCandles(eq("15m"), anyInt())).thenReturn(uptrendCandles(15, 40));
+    when(nseClient.fetchIndexCandles(eq("5m"), anyInt())).thenReturn(uptrendCandles(5, 100));
+    mockNiftyQuote(BigDecimal.valueOf(24500));
+    service.evaluate();
+    when(patternService.detectPatterns(anyList())).thenReturn(List.of("BULLISH_ENGULFING"));
+    mockOptionChain("CE", BigDecimal.valueOf(24500), BigDecimal.valueOf(80));
+    mockNiftyQuote(BigDecimal.valueOf(24500));
+    service.evaluate();
+    final MultiTfRSINiftyOptionService.TfState dbg = getState();
+    System.out.println(
+        "DEBUG stateNull=" + (dbg == null) + " signals=" + service.getSignals().size());
+    assertFalse(service.getSignals().isEmpty());
+  }
+
+  private static List<OhlcCandle> historicalCandles(final int minutes, final int count) {
+    final List<OhlcCandle> candles = new ArrayList<>();
+    LocalDateTime t = LocalDateTime.of(2026, 7, 16, 9, 15);
+    BigDecimal price = BigDecimal.valueOf(24000);
+    for (int i = 0; i < count; i++) {
+      final OhlcCandle c = new OhlcCandle(t, price, price, price, price);
+      candles.add(c);
+      price = price.add(BigDecimal.valueOf(5));
+      t = t.plusMinutes(minutes);
+    }
+    return candles;
+  }
+
+  private static List<OhlcCandle> uptrendCandles(final int minutes, final int count) {
+    final List<OhlcCandle> candles = new ArrayList<>();
+    LocalDateTime t = LocalDateTime.of(2026, 7, 16, 9, 15);
+    BigDecimal price = BigDecimal.valueOf(24200);
+    for (int i = 0; i < count; i++) {
+      final BigDecimal open = price;
+      final BigDecimal close;
+      if (i < count - 8) {
+        close = open.subtract(BigDecimal.valueOf(5));
+      } else {
+        close = open.add(BigDecimal.valueOf(25));
+      }
+      final OhlcCandle c = new OhlcCandle(t, open, close, open, close);
+      candles.add(c);
+      price = close;
+      t = t.plusMinutes(minutes);
+    }
+    return candles;
   }
 
   private void mockNiftyQuote(final BigDecimal price) {

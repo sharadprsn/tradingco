@@ -6,10 +6,13 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.kite.trading.config.NseConfig;
 import com.kite.trading.dto.IndexQuote;
+import com.kite.trading.dto.OhlcCandle;
 import com.kite.trading.dto.OptionChainData;
 import com.kite.trading.dto.StockQuote;
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -413,6 +416,150 @@ public class NseOptionChainClient implements OptionChainClient {
 
   public record BhavCopyEntry(BigDecimal high, BigDecimal low) {}
 
+  /**
+   * Fetches historical index OHLC candles (e.g. NIFTY 5m/15m) used to warm up RSI/SMA at the start
+   * of a trading day so that the 15m RSI(14) is valid from the first bar.
+   *
+   * <p>Primary source is the local nse-ohlc-api service (yfinance/TradingView). On failure it falls
+   * back to Yahoo Finance's public chart endpoint. Index volume is not reported by Yahoo and is
+   * left as zero.
+   *
+   * @param interval candle interval, e.g. "5m" or "15m"
+   * @param count number of recent candles to request
+   * @return list of OHLC candles (oldest first); empty on failure
+   */
+  public List<OhlcCandle> fetchIndexCandles(final String interval, final int count) {
+    final List<OhlcCandle> fromApi = fetchIndexCandlesFromOhlcApi(interval, count);
+    if (!fromApi.isEmpty()) {
+      return fromApi;
+    }
+    logger.warn("OHLC API unavailable for {} {}, falling back to Yahoo direct", interval, count);
+    return fetchIndexCandlesFromYahoo(interval, count);
+  }
+
+  private List<OhlcCandle> fetchIndexCandlesFromOhlcApi(final String interval, final int count) {
+    try {
+      final String url = nseConfig.getOhlcApiBaseUrl() + "/api/ohlc/auto";
+      final java.util.Map<String, Object> body = new java.util.LinkedHashMap<>();
+      body.put("symbol", nseConfig.getOhlcApiSymbol());
+      body.put("interval", interval);
+      body.put("count", count);
+      final String json =
+          webClient
+              .post()
+              .uri(url)
+              .contentType(MediaType.APPLICATION_JSON)
+              .accept(MediaType.APPLICATION_JSON)
+              .header("User-Agent", nseConfig.getUserAgent())
+              .bodyValue(body)
+              .retrieve()
+              .bodyToMono(String.class)
+              .block(Duration.ofMillis(nseConfig.getOhlcApiTimeoutMs()));
+      if (json == null || json.isBlank()) {
+        return List.of();
+      }
+      final OhlcApiResponse response = objectMapper.readValue(json, OhlcApiResponse.class);
+      return mapOhlcApiData(response);
+    } catch (final Exception e) {
+      logger.warn(
+          "Failed to fetch candles from OHLC API ({} {}): {} {}",
+          interval,
+          count,
+          e.getClass().getSimpleName(),
+          e.getMessage());
+      return List.of();
+    }
+  }
+
+  private List<OhlcCandle> fetchIndexCandlesFromYahoo(final String interval, final int count) {
+    try {
+      final String symbol = nseConfig.getOhlcApiSymbol().replace("^", "%5E");
+      final String url =
+          "https://query1.finance.yahoo.com/v8/finance/chart/"
+              + symbol
+              + "?interval="
+              + interval
+              + "&range=5d";
+      final String json =
+          webClient
+              .get()
+              .uri(url)
+              .header("User-Agent", nseConfig.getUserAgent())
+              .accept(MediaType.APPLICATION_JSON)
+              .retrieve()
+              .bodyToMono(String.class)
+              .block(Duration.ofMillis(nseConfig.getOhlcApiTimeoutMs()));
+      if (json == null || json.isBlank()) {
+        return List.of();
+      }
+      final YahooChartResponse response = objectMapper.readValue(json, YahooChartResponse.class);
+      return mapYahooData(response);
+    } catch (final Exception e) {
+      logger.warn(
+          "Failed to fetch candles from Yahoo ({} {}): {} {}",
+          interval,
+          count,
+          e.getClass().getSimpleName(),
+          e.getMessage());
+      return List.of();
+    }
+  }
+
+  private static List<OhlcCandle> mapOhlcApiData(final OhlcApiResponse response) {
+    final List<OhlcCandle> result = new ArrayList<>();
+    if (response == null
+        || response.data() == null
+        || response.data().data() == null
+        || response.data().data().isEmpty()) {
+      return result;
+    }
+    for (final OhlcApiBar bar : response.data().data()) {
+      if (bar == null || bar.open() == null || bar.close() == null) {
+        continue;
+      }
+      final BigDecimal high = bar.high() != null ? bar.high() : bar.open().max(bar.close());
+      final BigDecimal low = bar.low() != null ? bar.low() : bar.open().min(bar.close());
+      if (high.compareTo(low) == 0) {
+        continue;
+      }
+      result.add(new OhlcCandle(bar.datetime(), bar.open(), high, low, bar.close()));
+    }
+    return result;
+  }
+
+  private static List<OhlcCandle> mapYahooData(final YahooChartResponse response) {
+    final List<OhlcCandle> result = new ArrayList<>();
+    if (response == null
+        || response.chart() == null
+        || response.chart().result() == null
+        || response.chart().result().isEmpty()) {
+      return result;
+    }
+    final YahooChartResult res = response.chart().result().getFirst();
+    if (res.timestamp() == null || res.indicators() == null || res.indicators().quote() == null) {
+      return result;
+    }
+    final List<Long> ts = res.timestamp();
+    final YahooQuote q = res.indicators().quote().getFirst();
+    final int n = Math.min(Math.min(ts.size(), q.open().size()), q.close().size());
+    for (int i = 0; i < n; i++) {
+      final BigDecimal open = q.open().get(i);
+      final BigDecimal close = q.close().get(i);
+      if (open == null || close == null) {
+        continue;
+      }
+      final BigDecimal high = q.high().get(i) != null ? q.high().get(i) : open.max(close);
+      final BigDecimal low = q.low().get(i) != null ? q.low().get(i) : open.min(close);
+      if (high.compareTo(low) == 0) {
+        continue;
+      }
+      final LocalDateTime dt =
+          LocalDateTime.ofEpochSecond(ts.get(i), 0, java.time.ZoneOffset.ofHoursMinutes(5, 30));
+      result.add(new OhlcCandle(dt, open, high, low, close));
+    }
+    return result;
+  }
+
   @JsonIgnoreProperties(ignoreUnknown = true)
   public record PreOpenResponse(
       @JsonProperty("advances") int advances,
@@ -518,4 +665,44 @@ public class NseOptionChainClient implements OptionChainClient {
       @JsonProperty("totalTradedVolume") BigDecimal totalTradedVolume,
       @JsonProperty("impliedVolatility") BigDecimal impliedVolatility,
       @JsonProperty("lastPrice") BigDecimal lastPrice) {}
+
+  // ---- OHLC API (nse-ohlc-api) response DTOs ----
+
+  @JsonIgnoreProperties(ignoreUnknown = true)
+  record OhlcApiResponse(@JsonProperty("data") OhlcApiData data) {}
+
+  @JsonIgnoreProperties(ignoreUnknown = true)
+  record OhlcApiData(@JsonProperty("data") List<OhlcApiBar> data) {}
+
+  @JsonIgnoreProperties(ignoreUnknown = true)
+  record OhlcApiBar(
+      @JsonProperty("datetime") LocalDateTime datetime,
+      @JsonProperty("open") BigDecimal open,
+      @JsonProperty("high") BigDecimal high,
+      @JsonProperty("low") BigDecimal low,
+      @JsonProperty("close") BigDecimal close,
+      @JsonProperty("volume") BigDecimal volume) {}
+
+  // ---- Yahoo Finance chart (fallback) response DTOs ----
+
+  @JsonIgnoreProperties(ignoreUnknown = true)
+  record YahooChartResponse(@JsonProperty("chart") YahooChart chart) {}
+
+  @JsonIgnoreProperties(ignoreUnknown = true)
+  record YahooChart(@JsonProperty("result") List<YahooChartResult> result) {}
+
+  @JsonIgnoreProperties(ignoreUnknown = true)
+  record YahooChartResult(
+      @JsonProperty("timestamp") List<Long> timestamp,
+      @JsonProperty("indicators") YahooIndicators indicators) {}
+
+  @JsonIgnoreProperties(ignoreUnknown = true)
+  record YahooIndicators(@JsonProperty("quote") List<YahooQuote> quote) {}
+
+  @JsonIgnoreProperties(ignoreUnknown = true)
+  record YahooQuote(
+      @JsonProperty("open") List<BigDecimal> open,
+      @JsonProperty("high") List<BigDecimal> high,
+      @JsonProperty("low") List<BigDecimal> low,
+      @JsonProperty("close") List<BigDecimal> close) {}
 }

@@ -65,6 +65,34 @@ public class NseConfig {
     this.homeUrl = homeUrl;
   }
 
+  private String ohlcApiBaseUrl = "http://nse-ohlc-api:5000";
+  private int ohlcApiTimeoutMs = 10000;
+  private String ohlcApiSymbol = "^NSEI";
+
+  public String getOhlcApiBaseUrl() {
+    return ohlcApiBaseUrl;
+  }
+
+  public void setOhlcApiBaseUrl(final String ohlcApiBaseUrl) {
+    this.ohlcApiBaseUrl = ohlcApiBaseUrl;
+  }
+
+  public int getOhlcApiTimeoutMs() {
+    return ohlcApiTimeoutMs;
+  }
+
+  public void setOhlcApiTimeoutMs(final int ohlcApiTimeoutMs) {
+    this.ohlcApiTimeoutMs = ohlcApiTimeoutMs;
+  }
+
+  public String getOhlcApiSymbol() {
+    return ohlcApiSymbol;
+  }
+
+  public void setOhlcApiSymbol(final String ohlcApiSymbol) {
+    this.ohlcApiSymbol = ohlcApiSymbol;
+  }
+
   public String getUserAgent() {
     return userAgent;
   }
