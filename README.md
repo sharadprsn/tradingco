@@ -36,6 +36,24 @@ Intraday breakout strategy on F&O stocks using PDH/PDL (Previous Day High/Low):
 - **Exit** — Partial at 1:2 RR (50% book), trailing stop, EMA 10 crossover
 - **Schedule** — Every 5 min, 9:30 AM – 3:30 PM
 
+### 3. Sniper — NIFTY 50 & SENSEX Option Buying (Process Discipline Tool)
+
+A strict, emotionless 7-step checklist that only alerts (never auto-executes) when **every** step passes. It treats the trading process like a pilot's pre-flight checklist — no step may be skipped. Covers both NIFTY 50 (NSE) and SENSEX (BSE) index options.
+
+1. **India VIX gate** — If VIX > 19, no trade today (premiums too expensive).
+2. **FII / DII context** — Previous-day net buy/sell (background only; counter-trend context demands more confirmation).
+3. **PDH / PDL** — Previous-day high/low marked from prior session 1-min candles (the "battlefield boundaries").
+4. **Opening Range (OR)** — High/low of 9:15–9:45 is marked as OR high/low once the range completes.
+5. **Wait** — Act only on a breakout or reversal of one of the 4 levels (PDH, PDL, ORH, ORL); otherwise stay idle.
+6. **Volume confirmation** — The trigger bar must print above the recent average volume (false breakouts filtered out).
+7. **EMA alignment** — Price must sustain on the correct side of the EMA (9-period) for the intended direction.
+
+- **Instruments** — NIFTY 50 (CE/PE) and SENSEX (CE/PE) ATM ± 100, premium ₹20–₹300
+- **Signal** — CE for long setups, PE for short setups, pushed to Telegram with VIX/FII/DII/volume/EMA status
+- **Schedule** — Every 1 min, 9:15 AM – 3:30 PM; daily reset at 8:00 AM
+- **Discipline only** — This is an alert tool, not investment advice or a signal service; the human decides whether to execute
+
+
 ### 2. Multi-TF RSI Nifty Option
 Nifty index options strategy using multi-timeframe RSI divergence and candlestick patterns:
 
@@ -110,7 +128,8 @@ src/main/java/com/kite/trading/
 │   └── ... (Kite auth, order DTOs)
 ├── scheduler/
 │   ├── VandeBharatStrategyScheduler.java  # 5-min fixed rate + cron reset/scan
-│   └── MultiTfRSINiftyScheduler.java      # 1-min fixed rate + cron reset
+│   ├── MultiTfRSINiftyScheduler.java      # 1-min fixed rate + cron reset
+│   └── SniperStrategyScheduler.java       # 1-min fixed rate + cron reset
 ├── exception/
 │   ├── GlobalExceptionHandler.java      # REST error handling
 │   ├── KiteApiException.java            # Kite API errors
@@ -120,6 +139,7 @@ src/main/java/com/kite/trading/
     ├── BseOptionChainClient.java         # BSE option chain client
     ├── VandeBharatStrategyService.java   # Vande Bharat breakout strategy
     ├── MultiTfRSINiftyOptionService.java # Multi-TF RSI Nifty option strategy
+    ├── SniperStrategyService.java        # Sniper 7-step NIFTY/SENSEX option process
     ├── CandlestickPatternService.java    # Candlestick pattern detection
     ├── TelegramServiceImpl.java          # Telegram messaging
     ├── TelegramService.java              # Telegram interface
@@ -155,16 +175,18 @@ NSE API ──► NseOptionChainClient ──► MultiTfRSINiftyOptionService �
 | **Vande Bharat Exit** | Stock, exit price, reason (TRAILING STOP / EMA 10) |
 | **Multi-TF RSI Signal** | Direction, option type, strike, premium, spot, patterns, RSI alignment |
 | **Multi-TF RSI Exit** | Direction, exit premium, reason (RSI CROSS / CONFLICT) |
+| **Sniper Signal** | Index, direction, option type, strike, premium, spot, triggered level, VIX/FII/DII, volume/EMA status |
 | **Error** | Scheduler error message |
 
 ## Scheduler Schedule
 
 | Time (IST) | Action |
 |------------|--------|
-| 8:00 AM | Multi-TF RSI daily reset |
+| 8:00 AM | Multi-TF RSI + Sniper daily reset |
 | 9:00 AM | Vande Bharat daily reset |
 | 9:10 AM | Vande Bharat pre-market scan (top 10 F&O stocks) |
 | 9:15 AM – 3:30 PM | Vande Bharat analysis every 5 min |
+| 9:15 AM – 3:30 PM | Sniper NIFTY/SENSEX evaluation every 1 min (pre-market context + 7-step gate) |
 | 9:30 AM – 11:30 AM | Multi-TF RSI Nifty evaluation every 1 min |
 | Weekends | No activity |
 
@@ -237,6 +259,7 @@ docker run -d --name kite-trading -p 443:443 --env-file .env sharadprsn/kite-tra
 |-----------|-------|--------|
 | `VandeBharatStrategyServiceTest` | — | Vande Bharat breakout, inside candle, entry/exit signals |
 | `MultiTfRSINiftyOptionServiceTest` | — | RSI computation, entry/exit logic, strike selection |
+| `SniperStrategyServiceTest` | 12 | 7-step gate, VIX/FII-DII context, PDH/PDL, OR, volume & EMA confirmation, NIFTY + SENSEX |
 | `CandlestickPatternServiceTest` | — | Pattern detection (hammer, engulfing, marubozu, doji) |
 | `StartupHealthCheckTest` | 4 | NSE/Telegram success and failure paths |
 | `NseConnectivityTest` | 3 | NSE config URLs, option chain data validation |
@@ -276,3 +299,14 @@ docker run -d --name kite-trading -p 443:443 --env-file .env sharadprsn/kite-tra
 | `MAX_TRADES_PER_DAY` | 1 | Max trades per day |
 | `FIVE_MIN_CANDLES` | 5 | 1-min ticks per 5-min candle |
 | `FIFTEEN_MIN_CANDLES` | 3 | 5-min candles per 15-min candle |
+
+## Sniper Constants
+
+| Constant | Value | Purpose |
+|----------|-------|---------|
+| `VIX_GATE` | 19 | India VIX above this halts all trading for the day (Step 1) |
+| `VOLUME_AVG_PERIOD` | 20 | Lookback for average volume baseline (Step 6) |
+| `VOLUME_MIN_MULTIPLE` | 1.2 | Trigger volume must exceed this × average to confirm (Step 6) |
+| `EMA_PERIOD` | 9 | EMA period for directional alignment (Step 7) |
+| `SIGNAL_START` / `SIGNAL_END` | 9:50 / 15:00 | Window during which new signals are allowed |
+| `MIN_PREMIUM` / `MAX_PREMIUM` | ₹20 / ₹300 | Option premium band for strike selection |

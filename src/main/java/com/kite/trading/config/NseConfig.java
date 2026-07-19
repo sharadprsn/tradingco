@@ -51,6 +51,10 @@ public class NseConfig {
     return "https://www.nseindia.com/api/market-data-pre-open?key=" + key;
   }
 
+  public String getFiiDiiUrl() {
+    return "https://www.nseindia.com/api/fiidiidailyews";
+  }
+
   public String getBhavCopyUrl(final String dateStr) {
     return "https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_"
         + dateStr

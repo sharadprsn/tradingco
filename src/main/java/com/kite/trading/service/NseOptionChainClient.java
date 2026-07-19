@@ -437,6 +437,108 @@ public class NseOptionChainClient implements OptionChainClient {
     return fetchIndexCandlesFromYahoo(interval, count);
   }
 
+  /**
+   * Fetches the most recent completed daily (1-day) candle for an index. Used by the Sniper
+   * strategy to derive the previous-day high/low (PDH/PDL) directly from the daily bar rather than
+   * stitching 1-minute candles. Returns the single prior-session candle (oldest first); empty on
+   * failure.
+   */
+  public List<OhlcCandle> fetchIndexDailyCandle() {
+    final List<OhlcCandle> fromApi = fetchIndexCandlesFromOhlcApi("1d", 2);
+    if (!fromApi.isEmpty()) {
+      // The last candle is the most recent completed session (previous trading day).
+      final OhlcCandle last = fromApi.get(fromApi.size() - 1);
+      return List.of(last);
+    }
+    logger.warn("OHLC API unavailable for 1d, falling back to Yahoo direct");
+    final List<OhlcCandle> yahoo = fetchIndexCandlesFromYahoo("1d", 2);
+    if (yahoo.isEmpty()) {
+      return List.of();
+    }
+    return List.of(yahoo.get(yahoo.size() - 1));
+  }
+
+  /**
+   * Fetches historical index candles for a date range from Yahoo Finance (the only available source
+   * with arbitrary date-range support). Used by backtests.
+   *
+   * <p>Yahoo caps the 1-minute interval to a ~7-day span, so longer ranges are fetched in 6-day
+   * windows and concatenated. Returns candles oldest-first; empty on failure.
+   *
+   * @param index NIFTY or SENSEX
+   * @param interval candle interval, e.g. "1m" or "1d"
+   * @param fromInclusive start epoch seconds (IST day boundary)
+   * @param toExclusive end epoch seconds
+   */
+  public List<OhlcCandle> fetchIndexCandlesHistory(
+      final String index, final String interval, final long fromInclusive, final long toExclusive) {
+    final String yahooSymbol = yahooSymbolFor(index);
+    if (yahooSymbol == null) {
+      logger.warn("No Yahoo symbol mapping for index {}", index);
+      return List.of();
+    }
+    final boolean isOneMin = "1m".equals(interval);
+    final long maxSpan = isOneMin ? 6L * 24 * 60 * 60 : Long.MAX_VALUE;
+    final List<OhlcCandle> all = new ArrayList<>();
+    long windowStart = fromInclusive;
+    while (windowStart < toExclusive) {
+      final long windowEnd = Math.min(windowStart + maxSpan, toExclusive);
+      final List<OhlcCandle> chunk = fetchYahooRange(yahooSymbol, interval, windowStart, windowEnd);
+      all.addAll(chunk);
+      if (windowEnd >= toExclusive) {
+        break;
+      }
+      windowStart = windowEnd;
+    }
+    all.sort(java.util.Comparator.comparing(OhlcCandle::timestamp));
+    return all;
+  }
+
+  private List<OhlcCandle> fetchYahooRange(
+      final String yahooSymbol, final String interval, final long period1, final long period2) {
+    try {
+      final String url =
+          "https://query1.finance.yahoo.com/v8/finance/chart/"
+              + yahooSymbol
+              + "?interval="
+              + interval
+              + "&period1="
+              + period1
+              + "&period2="
+              + period2;
+      final String json =
+          webClient
+              .get()
+              .uri(url)
+              .header("User-Agent", nseConfig.getUserAgent())
+              .accept(MediaType.APPLICATION_JSON)
+              .retrieve()
+              .bodyToMono(String.class)
+              .block(Duration.ofMillis(nseConfig.getOhlcApiTimeoutMs()));
+      if (json == null || json.isBlank()) {
+        return List.of();
+      }
+      final YahooChartResponse response = objectMapper.readValue(json, YahooChartResponse.class);
+      return mapYahooData(response);
+    } catch (final Exception e) {
+      logger.warn(
+          "Failed to fetch Yahoo history ({} {}): {} {}",
+          yahooSymbol,
+          interval,
+          e.getClass().getSimpleName(),
+          e.getMessage());
+      return List.of();
+    }
+  }
+
+  private static String yahooSymbolFor(final String index) {
+    return switch (index) {
+      case "NIFTY" -> "^NSEI";
+      case "SENSEX" -> "^BSESN";
+      default -> null;
+    };
+  }
+
   private List<OhlcCandle> fetchIndexCandlesFromOhlcApi(final String interval, final int count) {
     try {
       final String url = nseConfig.getOhlcApiBaseUrl() + "/api/ohlc/auto";
@@ -579,6 +681,94 @@ public class NseOptionChainClient implements OptionChainClient {
       @JsonProperty("finalQuantity") long finalQuantity,
       @JsonProperty("totalTurnover") BigDecimal totalTurnover,
       @JsonProperty("iep") BigDecimal iep) {}
+
+  @JsonIgnoreProperties(ignoreUnknown = true)
+  public record IndiaVixResponse(@JsonProperty("data") List<IndiaVixItem> data) {}
+
+  @JsonIgnoreProperties(ignoreUnknown = true)
+  public record IndiaVixItem(
+      @JsonProperty("symbol") String symbol, @JsonProperty("last") BigDecimal last) {}
+
+  /**
+   * Fetches the current India VIX level. VIX above {@code 19} makes option premiums too expensive
+   * for most strategies to work, so it is used as a pre-trade gate.
+   *
+   * @return current India VIX, or {@code null} if unavailable
+   */
+  public BigDecimal fetchIndiaVix() {
+    ensureSession();
+    final String url = nseConfig.getIndexQuoteUrl("VIX");
+    logger.debug("Fetching India VIX from {}", url);
+    try {
+      final String json =
+          webClient
+              .get()
+              .uri(url)
+              .header("User-Agent", nseConfig.getUserAgent())
+              .header("Accept", MediaType.APPLICATION_JSON_VALUE)
+              .header("Accept-Language", "en-US,en;q=0.9")
+              .header("Referer", nseConfig.getHomeUrl())
+              .header("Cookie", sessionCookie != null ? sessionCookie : "")
+              .retrieve()
+              .bodyToMono(String.class)
+              .block();
+      if (json == null || json.isBlank()) {
+        return null;
+      }
+      final IndiaVixResponse response = objectMapper.readValue(json, IndiaVixResponse.class);
+      if (response.data() == null || response.data().isEmpty()) {
+        return null;
+      }
+      return response.data().getFirst().last();
+    } catch (final Exception e) {
+      logger.error(
+          "Failed to fetch India VIX: {} {}", e.getClass().getSimpleName(), e.getMessage());
+      return null;
+    }
+  }
+
+  @JsonIgnoreProperties(ignoreUnknown = true)
+  public record FiiDiiResponse(@JsonProperty("data") List<FiiDiiItem> data) {}
+
+  @JsonIgnoreProperties(ignoreUnknown = true)
+  public record FiiDiiItem(
+      @JsonProperty("catHead") String category,
+      @JsonProperty("buyValue") BigDecimal buyValue,
+      @JsonProperty("sellValue") BigDecimal sellValue) {}
+
+  /**
+   * Fetches the previous trading day's FII and DII net figures (buy value minus sell value). This
+   * is market context only, not a directional signal.
+   *
+   * @return FII/DII context, or {@code null} if unavailable
+   */
+  public FiiDiiResponse fetchFiiDii() {
+    ensureSession();
+    final String url = nseConfig.getFiiDiiUrl();
+    logger.debug("Fetching FII/DII data from {}", url);
+    try {
+      final String json =
+          webClient
+              .get()
+              .uri(url)
+              .header("User-Agent", nseConfig.getUserAgent())
+              .header("Accept", MediaType.APPLICATION_JSON_VALUE)
+              .header("Accept-Language", "en-US,en;q=0.9")
+              .header("Referer", nseConfig.getHomeUrl())
+              .header("Cookie", sessionCookie != null ? sessionCookie : "")
+              .retrieve()
+              .bodyToMono(String.class)
+              .block();
+      if (json == null || json.isBlank()) {
+        return null;
+      }
+      return objectMapper.readValue(json, FiiDiiResponse.class);
+    } catch (final Exception e) {
+      logger.error(
+          "Failed to fetch FII/DII data: {} {}", e.getClass().getSimpleName(), e.getMessage());
+      return null;
+    }
+  }
 
   public PreOpenResponse fetchPreOpenData(final String key) {
     ensureSession();
